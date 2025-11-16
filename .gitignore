@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+
+# Environments / secrets
+.env
+
+# Databases & local artifacts
+*.db
+/quest.db
+/transcraiber.db
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+
+# Node/Frontend caches (just in case)
+node_modules/

@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="nl">
+
+<head>
+  <meta charset="utf-8">
+  <title>Quest &ndash; Raadsleden</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .icon-btn {
+      border: none;
+      background: none;
+      padding: 0.2rem;
+      margin: 0 0.1rem;
+      font-size: 1.1rem;
+      line-height: 1;
+      cursor: pointer;
+      color: #94a3b8;
+      transition: transform 0.15s ease;
+    }
+
+    .icon-btn:hover,
+    .icon-btn:focus {
+      transform: translateY(-1px);
+    }
+
+    .icon-btn.danger {
+      color: #c2410c;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      border: 0;
+    }
+
+    .modal {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 60;
+    }
+
+    .modal.open {
+      display: flex;
+    }
+
+    .modal-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.55);
+    }
+
+    .modal-content {
+      position: relative;
+      background: #fff;
+      padding: 1.25rem;
+      border-radius: 0.75rem;
+      width: min(560px, 96vw);
+      max-height: 90vh;
+      overflow-y: auto;
+      box-shadow: 0 20px 45px rgba(15, 23, 42, 0.35);
+    }
+
+    .modal-grid {
+      display: grid;
+      gap: 0.65rem;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+
+    .modal-grid label {
+      display: flex;
+      flex-direction: column;
+      gap: 0.2rem;
+      font-size: 0.9rem;
+    }
+
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.5rem;
+      margin-top: 0.75rem;
+    }
+
+    body.modal-open {
+      overflow: hidden;
+    }
+
+    .sort-btn {
+      border: none;
+      background: none;
+      font: inherit;
+      color: inherit;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      cursor: pointer;
+    }
+
+    .sort-btn svg {
+      width: 0.9rem;
+      height: 0.9rem;
+      stroke-width: 2.2px;
+    }
+
+    .name-cell {
+      font-weight: 600;
+    }
+
+    .title-cell,
+    .wrong-cell {
+      font-size: 0.9rem;
+      color: #475569;
+    }
+  </style>
+</head>
+
+<body>
+  <header class="topbar">
+    <div class="brand">Quest</div>
+    <nav class="nav-links">
+      <a href="/">Uploaden</a>
+      <a href="/#meetings">Vergaderingen</a>
+      <a href="/questions">Zoekvragen</a>
+      <a href="/councillors" class="active">Raadsleden</a>
+    </nav>
+  </header>
+
+  <main id="main-content">
+    <section class="card">
+      <div class="card-header">
+        <div>
+          <p class="eyebrow">Beheer</p>
+          <h1 class="page-title">Raadsleden</h1>
+        </div>
+        <div class="card-actions">
+          <button type="button" class="ghost-btn" id="addCouncillorBtn">Nieuw raadslid</button>
+        </div>
+      </div>
+      <p class="muted">Klik op de acties om gegevens te wijzigen of te verwijderen. Sorteer op voor- of achternaam via
+        de kolomtitels.</p>
+      <div class="table-wrapper">
+        <table id="councillors-table">
+          <thead>
+            <tr>
+              <th>
+                <button class="sort-btn" data-sort="given_name">
+                  Voornaam
+                  <span class="sr-only">(sorteer)</span>
+                </button>
+              </th>
+              <th>
+                <button class="sort-btn" data-sort="family_name">
+                  Achternaam
+                  <span class="sr-only">(sorteer)</span>
+                </button>
+              </th>
+              <th>Naam met titel</th>
+              <th>Foute schrijfwijzen</th>
+              <th>Acties</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="meeting-empty" id="councillors-empty" hidden>Geen raadsleden beschikbaar.</p>
+    </section>
+  </main>
+
+  <div class="modal" id="councillorModal" aria-hidden="true">
+    <div class="modal-overlay" data-modal-close></div>
+    <div class="modal-content">
+      <header class="card-header" style="margin-bottom:0.75rem;">
+        <div>
+          <p class="eyebrow">Beheer</p>
+          <h2 id="modalTitle">Nieuw raadslid</h2>
+        </div>
+        <button type="button" class="icon-btn" data-modal-close title="Sluiten">&times;</button>
+      </header>
+      <form id="councillorForm">
+        <div class="modal-grid">
+          <label>
+            Voornaam
+            <input type="text" name="given_name" required>
+          </label>
+          <label>
+            Achternaam
+            <input type="text" name="family_name" required>
+          </label>
+          <label>
+            Naam met titel
+            <input type="text" name="name_with_title" placeholder="bv. Schepen Janssens">
+          </label>
+          <label>
+            Foute schrijfwijzen
+            <input type="text" name="wrong_spellings" placeholder="varianten, komma gescheiden">
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="ghost-btn" data-modal-close>Annuleren</button>
+          <button type="submit" class="primary-btn" id="modalSubmitBtn">Opslaan</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/feather-icons"></script>
+  <script>
+    const htmlEscape = (value) => {
+      if (value === null || value === undefined) return '';
+      return String(value).replace(/[&<>"']/g, (ch) => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      }[ch]));
+    };
+
+    const tableBody = document.querySelector('#councillors-table tbody');
+    const emptyState = document.getElementById('councillors-empty');
+    const addBtn = document.getElementById('addCouncillorBtn');
+    const modal = document.getElementById('councillorModal');
+    const modalTitle = document.getElementById('modalTitle');
+    const modalSubmitBtn = document.getElementById('modalSubmitBtn');
+    const modalCloseButtons = document.querySelectorAll('[data-modal-close]');
+    const form = document.getElementById('councillorForm');
+    let currentCouncillors = [];
+    let modalMode = 'create';
+    let activeId = null;
+    let sortField = 'family_name';
+    let sortDirection = 'asc';
+
+    async function loadCouncillors() {
+      const res = await fetch('/api/councillors');
+      if (!res.ok) {
+        emptyState.hidden = false;
+        emptyState.textContent = 'Kon raadsleden niet laden.';
+        return;
+      }
+      const data = await res.json();
+      currentCouncillors = data.councillors || [];
+      renderTable();
+    }
+
+    function renderTable() {
+      const sorted = [...currentCouncillors].sort((a, b) => {
+        const lhs = (a[sortField] || '').toLowerCase();
+        const rhs = (b[sortField] || '').toLowerCase();
+        if (lhs === rhs) return 0;
+        const result = lhs < rhs ? -1 : 1;
+        return sortDirection === 'asc' ? result : -result;
+      });
+
+      tableBody.innerHTML = '';
+      if (!sorted.length) {
+        emptyState.hidden = false;
+        return;
+      }
+      emptyState.hidden = true;
+
+      sorted.forEach((c) => {
+        const tr = document.createElement('tr');
+        tr.dataset.id = c.id;
+        const fullName = [c.given_name || '', c.family_name || ''].filter(Boolean).join(' ').trim();
+        const queryParam = encodeURIComponent(fullName);
+        const linkMarkup = fullName
+          ? `<a href="/questions?submitter=${queryParam}">${htmlEscape(c.given_name || '')}</a>`
+          : htmlEscape(c.given_name || '');
+        const linkLast = fullName
+          ? `<a href="/questions?submitter=${queryParam}">${htmlEscape(c.family_name || '')}</a>`
+          : htmlEscape(c.family_name || '');
+        tr.innerHTML = `
+          <td class="name-cell">${linkMarkup || '—'}</td>
+          <td class="name-cell">${linkLast || '—'}</td>
+          <td class="title-cell">${htmlEscape(c.name_with_title || '—')}</td>
+          <td class="wrong-cell">${htmlEscape(c.wrong_spellings || '—')}</td>
+          <td class="table-actions">
+            <button type="button" class="icon-btn" data-action="edit" title="Bewerk">
+              <i data-feather="edit-2" aria-hidden="true"></i>
+              <span class="sr-only">Bewerk</span>
+            </button>
+            <button type="button" class="icon-btn danger" data-action="delete" title="Verwijder">
+              <i data-feather="trash-2" aria-hidden="true"></i>
+              <span class="sr-only">Verwijder</span>
+            </button>
+          </td>
+        `;
+        tableBody.appendChild(tr);
+      });
+      if (window.feather && typeof window.feather.replace === 'function') {
+        window.feather.replace();
+      }
+    }
+
+    function openModal(mode = 'create', item = null) {
+      modalMode = mode;
+      activeId = item?.id || null;
+      form.reset();
+      if (mode === 'create') {
+        modalTitle.textContent = 'Nieuw raadslid';
+        modalSubmitBtn.textContent = 'Toevoegen';
+      } else {
+        modalTitle.textContent = 'Raadslid bewerken';
+        modalSubmitBtn.textContent = 'Opslaan';
+        form.elements.given_name.value = item?.given_name || '';
+        form.elements.family_name.value = item?.family_name || '';
+        form.elements.name_with_title.value = item?.name_with_title || '';
+        form.elements.wrong_spellings.value = item?.wrong_spellings || '';
+      }
+      modal.classList.add('open');
+      modal.setAttribute('aria-hidden', 'false');
+      document.body.classList.add('modal-open');
+    }
+
+    function closeModal() {
+      modal.classList.remove('open');
+      modal.setAttribute('aria-hidden', 'true');
+      document.body.classList.remove('modal-open');
+      form.reset();
+      activeId = null;
+    }
+
+    modalCloseButtons.forEach((btn) => btn.addEventListener('click', closeModal));
+    addBtn?.addEventListener('click', () => openModal('create'));
+    window.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && modal.classList.contains('open')) {
+        closeModal();
+      }
+    });
+
+    document.querySelectorAll('.sort-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const field = btn.dataset.sort;
+        if (sortField === field) {
+          sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+        } else {
+          sortField = field;
+          sortDirection = 'asc';
+        }
+        renderTable();
+      });
+    });
+
+    tableBody.addEventListener('click', (event) => {
+      const btn = event.target.closest('.icon-btn');
+      if (!btn) return;
+      const action = btn.dataset.action;
+      const row = btn.closest('tr');
+      const id = row?.dataset.id;
+      if (!action || !id) return;
+      const councillor = currentCouncillors.find((c) => String(c.id) === String(id));
+      if (!councillor) return;
+      if (action === 'edit') {
+        openModal('edit', councillor);
+      } else if (action === 'delete') {
+        deleteCouncillor(id, btn);
+      }
+    });
+
+    async function deleteCouncillor(id, btn) {
+      if (!confirm('Dit raadslid verwijderen?')) return;
+      const original = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = '...';
+      try {
+        const res = await fetch(`/api/councillors/${id}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error('Verwijderen mislukt.');
+        await loadCouncillors();
+      } catch (err) {
+        alert(err.message || 'Verwijderen mislukt.');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = original;
+        if (window.feather && typeof window.feather.replace === 'function') {
+          window.feather.replace();
+        }
+      }
+    }
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const formData = new FormData(form);
+      const payload = Object.fromEntries(formData.entries());
+      const originalText = modalSubmitBtn.textContent;
+      modalSubmitBtn.disabled = true;
+      modalSubmitBtn.textContent = modalMode === 'create' ? 'Toevoegen...' : 'Opslaan...';
+      try {
+        let res;
+        if (modalMode === 'create') {
+          res = await fetch('/api/councillors', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+        } else {
+          res = await fetch(`/api/councillors/${activeId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+        }
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error || 'Bewerking mislukt.');
+        }
+        await loadCouncillors();
+        closeModal();
+      } catch (err) {
+        alert(err.message || 'Bewerking mislukt.');
+      } finally {
+        modalSubmitBtn.disabled = false;
+        modalSubmitBtn.textContent = originalText;
+      }
+    });
+
+    loadCouncillors();
+  </script>
+</body>
+
+</html>

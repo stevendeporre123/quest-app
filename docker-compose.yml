@@ -1,0 +1,29 @@
+version: "3.9"
+
+services:
+  quest:
+    build: .
+    image: quest-app:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      QUEST_DB_PATH: /data/quest.db
+    volumes:
+      - quest_data:/data
+    networks:
+      - default
+      - traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.quest.rule=Host(`quest.example.com`)"
+      - "traefik.http.routers.quest.entrypoints=websecure"
+      - "traefik.http.routers.quest.tls.certresolver=letsencrypt"
+      - "traefik.http.services.quest.loadbalancer.server.port=8000"
+
+networks:
+  traefik:
+    external: true
+
+volumes:
+  quest_data:

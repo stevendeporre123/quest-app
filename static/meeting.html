@@ -1,0 +1,926 @@
+<!doctype html>
+<html lang="nl">
+
+<head>
+  <meta charset="utf-8">
+  <title>Quest &ndash; Vergadering</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .icon-btn {
+      border: none;
+      background: none;
+      padding: 0.2rem;
+      margin: 0 0.1rem;
+      font-size: 1.1rem;
+      line-height: 1;
+      cursor: pointer;
+      color: #94a3b8;
+      transition: transform 0.15s ease;
+    }
+
+    .icon-btn:hover,
+    .icon-btn:focus {
+      transform: translateY(-1px);
+    }
+
+    .icon-btn.danger {
+      color: #c2410c;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      border: 0;
+    }
+
+    .modal {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 50;
+    }
+
+    .modal.open {
+      display: flex;
+    }
+
+    .modal-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.55);
+    }
+
+    .modal-content {
+      position: relative;
+      background: #fff;
+      padding: 1.5rem;
+      border-radius: 0.75rem;
+      width: min(840px, 95vw);
+      max-height: 90vh;
+      overflow-y: auto;
+      box-shadow: 0 20px 45px rgba(15, 23, 42, 0.35);
+    }
+
+    .modal-content h3 {
+      margin-top: 0;
+      margin-bottom: 0.5rem;
+    }
+
+    .modal-grid {
+      display: grid;
+      gap: 0.75rem;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+
+    .modal-actions {
+      margin-top: 1rem;
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.5rem;
+    }
+
+    .modal-info {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 0.5rem;
+      margin-bottom: 0.75rem;
+    }
+
+    .info-field {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 0.5rem;
+      padding: 0.55rem 0.75rem;
+    }
+
+    .info-label {
+      display: block;
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #94a3b8;
+      margin-bottom: 0.15rem;
+    }
+
+    .info-value {
+      font-size: 0.95rem;
+      color: #0f172a;
+      word-break: break-word;
+    }
+
+    .info-value.multiline {
+      max-height: 120px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+    }
+
+    .modal-grid.compact {
+      gap: 0.65rem;
+    }
+
+    .modal-grid.compact label {
+      display: flex;
+      flex-direction: column;
+      gap: 0.2rem;
+      font-size: 0.85rem;
+    }
+
+    .stacked {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+      margin-top: 0.75rem;
+    }
+
+    .stacked textarea {
+      min-height: 90px;
+    }
+
+    .qa-people {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+      margin: 0.5rem 0 0.75rem;
+    }
+
+    .person-chip {
+      background: #eef2ff;
+      color: #312e81;
+      font-size: 0.85rem;
+      border-radius: 999px;
+      padding: 0.15rem 0.8rem;
+    }
+
+    body.modal-open {
+      overflow: hidden;
+    }
+
+    .question-card.highlight {
+      outline: 2px solid #6366f1;
+      transition: outline-offset 0.3s ease;
+      outline-offset: 4px;
+    }
+
+    .person-cell {
+      display: flex;
+      flex-direction: column;
+      gap: 0.2rem;
+      font-size: 0.9rem;
+      line-height: 1.2;
+    }
+
+    .person-cell .person-name {
+      font-weight: 600;
+      color: #0f172a;
+    }
+
+    .person-cell .person-name.person-link {
+      color: #0f172a;
+      text-decoration: none;
+      border-bottom: 1px solid transparent;
+      transition: border-color 0.15s ease;
+    }
+
+    .person-cell .person-name.person-link:hover {
+      border-color: #94a3b8;
+    }
+
+    .person-cell .person-meta {
+      font-size: 0.75rem;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .time-cell {
+      font-variant-numeric: tabular-nums;
+      color: #475569;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .info-only {
+      background: #f8fafc;
+      border-color: #e2e8f0;
+      color: #475569;
+      cursor: not-allowed;
+    }
+
+    .info-only:focus {
+      outline: none;
+      box-shadow: 0 0 0 1px #cbd5f5;
+    }
+  </style>
+</head>
+
+<body id="top">
+  <header class="topbar">
+    <div class="brand">Quest</div>
+    <nav class="nav-links">
+      <a href="/">Uploaden</a>
+      <a href="/questions">Zoekvragen</a>
+      <a href="#question-details">Vragen</a>
+      <a href="/councillors">Raadsleden</a>
+    </nav>
+  </header>
+
+  <main id="main-content">
+    <a class="back-link" href="/">&larr; Terug naar upload</a>
+
+    <section class="card" id="meetingIntro">
+      <div class="card-header">
+        <div>
+          <p class="eyebrow" id="meeting-date"></p>
+          <h1 class="page-title" id="meeting-title">Vergadering</h1>
+          <p class="muted" id="meeting-meta"></p>
+        </div>
+        <div class="card-actions">
+          <a id="export-link" class="ghost-btn" href="#">Download Word</a>
+          <button type="button" class="ghost-btn" id="restoreMissingBtn">Herstel ontbrekende vragen</button>
+          <button type="button" class="danger-btn" id="deleteMeetingBtn">Verwijder vergadering</button>
+        </div>
+      </div>
+      <div id="webcast-container" class="webcast-frame muted">Webcast wordt geladen...</div>
+    </section>
+
+    <section class="card">
+      <div class="card-header">
+        <div>
+          <p class="eyebrow">Stap 2</p>
+          <h2>Vragen en antwoorden</h2>
+        </div>
+        <div class="card-actions">
+          <p class="muted">Gebruik de acties om vragen te bekijken of aan te passen.</p>
+          <button type="button" class="ghost-btn" id="addQuestionBtn">Nieuwe vraag</button>
+        </div>
+      </div>
+      <div class="table-wrapper">
+        <table id="questions-table" class="questions-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Onderwerp</th>
+              <th>Indiener</th>
+              <th>Schepen</th>
+              <th>Vraag</th>
+              <th>Antwoord</th>
+              <th>Acties</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card" id="question-details">
+      <p class="eyebrow">Stap 3</p>
+      <h2>Volledige vraag & antwoord</h2>
+      <div id="question-detail-list"></div>
+    </section>
+
+    <div class="modal" id="questionModal" aria-hidden="true">
+      <div class="modal-overlay" data-modal-close></div>
+      <div class="modal-content">
+        <header class="card-header" style="margin-bottom:1rem;">
+          <div>
+            <p class="eyebrow">Bewerken</p>
+            <h3 id="questionModalTitle">Nieuwe vraag</h3>
+          </div>
+          <button type="button" class="icon-btn" id="closeQuestionModal" data-modal-close title="Sluiten">&times;</button>
+        </header>
+        
+        <form id="questionForm">
+          <div class="modal-info" id="questionInfo">
+            <div class="info-field">
+              <span class="info-label">Titel</span>
+              <span class="info-value" data-info="title"></span>
+            </div>
+            <div class="info-field">
+              <span class="info-label">Sequencenummer</span>
+              <span class="info-value" data-info="sequence"></span>
+            </div>
+            <div class="info-field">
+              <span class="info-label">Indiener</span>
+              <span class="info-value" data-info="submitter"></span>
+            </div>
+            <div class="info-field">
+              <span class="info-label">Schepen</span>
+              <span class="info-value" data-info="assignee"></span>
+            </div>
+            <div class="info-field info-long" style="grid-column: 1 / -1;">
+              <span class="info-label">Vraag</span>
+              <span class="info-value multiline" data-info="question_text"></span>
+            </div>
+          </div>
+
+          <div class="modal-grid compact">
+            <label>
+              Vraag start
+              <input type="text" name="question_start_time" placeholder="00:00:00">
+            </label>
+            <label>
+              Vraag einde
+              <input type="text" name="question_end_time" placeholder="00:03:12">
+            </label>
+            <label>
+              Antwoord start
+              <input type="text" name="answer_start_time" placeholder="00:04:00">
+            </label>
+            <label>
+              Antwoord einde
+              <input type="text" name="answer_end_time" placeholder="00:05:30">
+            </label>
+          </div>
+
+          <label class="stacked">
+            Antwoord (gebalde versie)
+            <textarea name="answer_text_raw" rows="4" placeholder="Bewerkte versie"></textarea>
+          </label>
+          <label class="stacked">
+            Antwoord (quasi letterlijke versie)
+            <textarea name="answer_text_verbatim" rows="4" placeholder="Verbatim tekst"></textarea>
+          </label>
+<div class="modal-actions">
+            <button type="button" class="ghost-btn" id="cancelQuestionModal" data-modal-close>Annuleren</button>
+            <button type="submit" class="primary-btn" id="questionModalSubmit">Opslaan</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </main>
+
+  <script src="https://unpkg.com/feather-icons"></script>
+  <script>
+    const pathParts = window.location.pathname.split('/');
+    const meetingId = pathParts[pathParts.length - 1];
+
+    const deleteMeetingBtn = document.getElementById('deleteMeetingBtn');
+    const restoreBtn = document.getElementById('restoreMissingBtn');
+
+    deleteMeetingBtn?.addEventListener('click', async () => {
+      if (!confirm(`Vergadering #${meetingId} verwijderen?`)) return;
+      deleteMeetingBtn.disabled = true;
+      deleteMeetingBtn.textContent = 'Verwijderen...';
+      const res = await fetch(`/api/meetings/${meetingId}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        window.location.href = '/';
+      } else {
+        alert('Verwijderen mislukt.');
+        deleteMeetingBtn.disabled = false;
+        deleteMeetingBtn.textContent = 'Verwijder vergadering';
+      }
+    });
+
+    restoreBtn?.addEventListener('click', async () => {
+      restoreBtn.disabled = true;
+      const original = restoreBtn.textContent;
+      restoreBtn.textContent = 'Herstellen...';
+      const res = await fetch(`/api/meetings/${meetingId}/restore-missing`, {
+        method: 'POST'
+      });
+      if (res.ok) {
+        await loadMeeting();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || 'Herstel mislukt.');
+      }
+      restoreBtn.disabled = false;
+      restoreBtn.textContent = original;
+    });
+
+    let currentQuestions = [];
+
+    const addQuestionBtn = document.getElementById('addQuestionBtn');
+    const questionModal = document.getElementById('questionModal');
+    const questionForm = document.getElementById('questionForm');
+    const questionModalTitle = document.getElementById('questionModalTitle');
+    const questionModalSubmit = document.getElementById('questionModalSubmit');
+    const modalCloseElements = document.querySelectorAll('[data-modal-close]');
+
+    let modalMode = 'create';
+    let activeQuestionId = null;
+
+    const htmlEscape = (value) => {
+      if (value === null || value === undefined) return '';
+      return String(value).replace(/[&<>"']/g, (ch) => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      }[ch]));
+    };
+
+    const parseListField = (value) => {
+      if (!value) return [];
+      if (Array.isArray(value)) return value;
+      try {
+        const parsed = JSON.parse(value);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return String(value)
+          .split(',')
+          .map((v) => v.trim())
+          .filter(Boolean);
+        }
+      };
+
+    const DASH = '\u2013';
+
+    const formatTimecode = (value) => {
+      if (value === undefined || value === null || value === '') return DASH;
+      const str = String(value).trim();
+      if (!str) return DASH;
+      const parts = str.split(':');
+      let total = 0;
+      for (let i = 0; i < parts.length; i++) {
+        const part = parts[i].replace(',', '.');
+        const num = parseFloat(part);
+        if (Number.isNaN(num)) {
+          return DASH;
+        }
+        total = total * 60 + num;
+      }
+      if (!Number.isFinite(total)) return DASH;
+      const whole = Math.max(0, Math.floor(total));
+      const hours = String(Math.floor(whole / 3600)).padStart(2, '0');
+      const minutes = String(Math.floor((whole % 3600) / 60)).padStart(2, '0');
+      const seconds = String(whole % 60).padStart(2, '0');
+      return `${hours}:${minutes}:${seconds}`;
+    };
+
+    const formatTimeRange = (start, end) => {
+      const from = formatTimecode(start);
+      const to = formatTimecode(end);
+      if (from === DASH && to === DASH) {
+        return DASH;
+      }
+      return `${from} ${DASH} ${to}`;
+    };
+
+    const formatName = (given, family) => {
+      const name = [given, family].map(part => (part || '').trim()).filter(Boolean).join(' ');
+      return name.trim();
+    };
+
+    const buildPersonInfo = (given, family, meta, fallbackForName = '') => {
+      const name = formatName(given, family) || fallbackForName || DASH;
+      const metaValue = (meta || '').trim() || DASH;
+      return { name, meta: metaValue };
+    };
+
+    const buildPersonLink = (info, queryKey) => {
+      if (!info || !info.name || info.name === DASH) {
+        return `<span class="person-name">${DASH}</span>`;
+      }
+      const url = `/questions?${queryKey}=${encodeURIComponent(info.name)}`;
+      return `<a class="person-name person-link" href="${url}">${htmlEscape(info.name)}</a>`;
+    };
+
+    const questionInfoBlock = document.getElementById('questionInfo');
+    const setInfoValue = (key, value) => {
+      const el = questionInfoBlock?.querySelector(`[data-info="${key}"]`);
+      if (el) {
+        el.textContent = (value && value.trim()) ? value : DASH;
+      }
+    };
+
+    function populateInfoFields(question) {
+      if (!questionInfoBlock) return;
+      questionInfoBlock.hidden = false;
+      const submitterName =
+        formatName(question.submitter_given_name, question.submitter_family_name) ||
+        question.submitter_given_name ||
+        question.submitter_family_name ||
+        DASH;
+      const assigneeName =
+        (question.assignee_label || '').trim() ||
+        formatName(question.assignee_given_name, question.assignee_family_name) ||
+        DASH;
+      const questionText = (question.question_text_raw || '').trim();
+      setInfoValue('title', question.title || question.subject || DASH);
+      setInfoValue('sequence', question.sequence_nr || DASH);
+      setInfoValue('submitter', submitterName);
+      setInfoValue('assignee', assigneeName);
+      setInfoValue('question_text', questionText || DASH);
+    }
+
+    function openQuestionModal(mode = 'create', question = null) {
+      modalMode = mode;
+      activeQuestionId = question?.id || null;
+      questionForm.reset();
+      const setValue = (name, value) => {
+        const el = questionForm.elements[name];
+        if (el && !el.disabled) el.value = value || '';
+      };
+
+      if (mode === 'create') {
+        if (questionInfoBlock) questionInfoBlock.hidden = true;
+      } else if (questionInfoBlock && question) {
+        questionInfoBlock.hidden = false;
+        populateInfoFields(question);
+      }
+
+      if (question) {
+        setValue('question_start_time', question.question_start_time || '');
+        setValue('question_end_time', question.question_end_time || '');
+        setValue('answer_start_time', question.answer_start_time || '');
+        setValue('answer_end_time', question.answer_end_time || '');
+        setValue('answer_text_raw', question.answer_text_raw || '');
+        setValue('answer_text_verbatim', question.answer_text_verbatim || '');
+      }
+      questionModalTitle.textContent = mode === 'create' ? 'Nieuwe vraag' : 'Vraag bewerken';
+      questionModalSubmit.textContent = mode === 'create' ? 'Toevoegen' : 'Opslaan';
+      questionModal.classList.add('open');
+      questionModal.setAttribute('aria-hidden', 'false');
+      document.body.classList.add('modal-open');
+    }
+
+    function closeQuestionModal() {
+      questionModal.classList.remove('open');
+      questionModal.setAttribute('aria-hidden', 'true');
+      document.body.classList.remove('modal-open');
+      questionForm.reset();
+      activeQuestionId = null;
+    }
+
+    function focusQuestionCard(questionId) {
+      const target = document.getElementById(`question-${questionId}`);
+      if (target) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        target.classList.add('highlight');
+        setTimeout(() => target.classList.remove('highlight'), 2000);
+      }
+    }
+
+    modalCloseElements.forEach((el) => {
+      el.addEventListener('click', () => {
+        closeQuestionModal();
+      });
+    });
+
+    window.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && questionModal.classList.contains('open')) {
+        closeQuestionModal();
+      }
+    });
+
+    addQuestionBtn?.addEventListener('click', () => openQuestionModal('create'));
+
+    async function loadMeeting() {
+      const res = await fetch(`/api/meetings/${meetingId}`);
+      if (!res.ok) {
+        document.getElementById('meetingIntro').innerHTML = '<p class="muted">Vergadering niet gevonden.</p>';
+        return;
+      }
+
+        const data = await res.json();
+        currentQuestions = data.questions || [];
+        const m = data.meeting;
+      document.getElementById('meeting-date').textContent = m.meeting_date || '';
+      document.getElementById('meeting-title').textContent =
+        `${m.commission_name || 'Vergadering'} - ${m.meeting_date || ''}`;
+      document.getElementById('meeting-meta').textContent =
+        m.webcast_id ? `Webcast ID: ${m.webcast_id}` : 'Geen webcast-id ingesteld.';
+
+      if (m.webcast_id) {
+        document.getElementById('webcast-container').innerHTML = `
+<iframe src="//sdk.companywebcast.com/sdk/player/?id=${m.webcast_id}"
+        height="460"
+        frameborder="0"
+        allowfullscreen mozallowfullscreen webkitallowfullscreen></iframe>`;
+      } else {
+        document.getElementById('webcast-container').textContent =
+          'Geen webcast-id ingesteld.';
+      }
+
+      document.getElementById('export-link').href = `/export/${meetingId}`;
+
+      const tbody = document.querySelector('#questions-table tbody');
+      tbody.innerHTML = '';
+
+      const detailList = document.getElementById('question-detail-list');
+      detailList.innerHTML = '';
+
+        data.questions.forEach(q => {
+          const tr = document.createElement('tr');
+          tr.dataset.questionId = q.id;
+        const submitterInfo = buildPersonInfo(
+          q.submitter_given_name,
+          q.submitter_family_name,
+          q.submitter_faction
+        );
+          const assigneeInfo = buildPersonInfo(
+            q.assignee_given_name,
+            q.assignee_family_name,
+            q.assignee_label,
+            q.assignee_label
+          );
+          const questionRangeDisplay = formatTimeRange(q.question_start_time, q.question_end_time);
+          const answerRangeDisplay = formatTimeRange(q.answer_start_time, q.answer_end_time);
+
+          tr.innerHTML = `
+          <td>${htmlEscape(q.sequence_nr || '')}</td>
+          <td>${htmlEscape(q.subject || '')}</td>
+          <td>
+            <div class="person-cell">
+              ${buildPersonLink(submitterInfo, 'submitter')}
+            </div>
+          </td>
+          <td>
+            <div class="person-cell">
+              ${buildPersonLink(assigneeInfo, 'assignee')}
+            </div>
+          </td>
+            <td class="time-cell">${questionRangeDisplay}</td>
+            <td class="time-cell">${answerRangeDisplay}</td>
+            <td class="table-actions">
+              <button type="button" class="icon-btn" data-action="view" title="Bekijk vraag">
+                <i data-feather="eye" aria-hidden="true"></i>
+                <span class="sr-only">Bekijk</span>
+              </button>
+              <button type="button" class="icon-btn" data-action="edit" title="Bewerk vraag">
+                <i data-feather="edit-2" aria-hidden="true"></i>
+                <span class="sr-only">Bewerk</span>
+              </button>
+              <button type="button" class="icon-btn danger delete-question" data-action="delete" data-id="${q.id}" title="Verwijder vraag">
+                <i data-feather="trash-2" aria-hidden="true"></i>
+                <span class="sr-only">Verwijder</span>
+              </button>
+            </td>
+          `;
+
+        tbody.appendChild(tr);
+
+        const submitterInfoDetail = buildPersonInfo(
+          q.submitter_given_name,
+          q.submitter_family_name,
+          q.submitter_faction
+        );
+        const assigneeInfoDetail = buildPersonInfo(
+          q.assignee_given_name,
+          q.assignee_family_name,
+          q.assignee_label,
+          q.assignee_label
+        );
+        const submitter =
+          submitterInfoDetail.name === DASH ? 'Onbekend' : submitterInfoDetail.name;
+        const assignee =
+          assigneeInfoDetail.name === DASH ? 'Onbekend' : assigneeInfoDetail.name;
+        const questionText = (q.question_text_raw || '').replace(/\n/g, '<br>');
+        const answerText = (q.answer_text_raw || '').replace(/\n/g, '<br>');
+        const answerVerbatim = (q.answer_text_verbatim || '').replace(/\n/g, '<br>');
+        const answerStatus = (q.answer_status || 'draft').toLowerCase();
+        const answerStatusLabel = answerStatus === 'approved' ? 'Goedgekeurd' : 'Concept';
+        const topicsSource = q.topics !== undefined && q.topics !== null ? q.topics : q.topics_json;
+        const actionsSource = q.actions !== undefined && q.actions !== null ? q.actions : q.actions_json;
+        const topicsList = parseListField(topicsSource);
+        const actionsList = parseListField(actionsSource);
+        const summaryHtml = (q.summary || '').replace(/\n/g, '<br>');
+        const topicsMarkup = topicsList.length ?
+          topicsList.map(topic => {
+            const safeTopic = htmlEscape(topic);
+            const url = `/questions?topic=${encodeURIComponent(topic)}`;
+            return `<a class="topic-pill" href="${url}">${safeTopic}</a>`;
+          }).join('') :
+          '<span class="muted">Geen topics opgegeven.</span>';
+        const actionsMarkup = actionsList.length ?
+          `<ul class="actions-list">${actionsList.map(action => `<li>${action}</li>`).join('')}</ul>` :
+          '<p class="muted">Geen acties geregistreerd.</p>';
+        const questionRange = formatTimeRange(q.question_start_time, q.question_end_time);
+        const answerRange = formatTimeRange(q.answer_start_time, q.answer_end_time);
+        const chips = '';
+
+        const detail = document.createElement('article');
+        detail.className = 'question-card';
+        detail.id = `question-${q.id}`;
+        detail.dataset.questionId = q.id;
+        detail.innerHTML = `
+          <div class="card-header">
+            <div>
+              <p class="eyebrow">Vraag ${q.sequence_nr || ''}</p>
+              <h3>${q.title || q.subject || 'Vraag'}</h3>
+            </div>
+            <div class="card-actions">
+              <a class="ghost-btn" href="#top">Naar boven</a>
+              <button type="button" class="ghost-btn regen-btn" data-id="${q.id}">Genereer opnieuw</button>
+              <button type="button" class="danger-btn delete-question" data-id="${q.id}">Verwijder</button>
+            </div>
+          </div>
+          <div class="question-meta">
+            <div><span>Vraagsteller</span>${buildPersonLink(submitterInfoDetail, 'submitter')}</div>
+            <div><span>Bevoegde schepen</span>${buildPersonLink(assigneeInfoDetail, 'assignee')}</div>
+            <div><span>Vraag</span>${questionRange}</div>
+            <div><span>Antwoord</span>${answerRange}</div>
+            <div><span>Status</span><span class="status-pill status-${answerStatus}">${answerStatusLabel}</span></div>
+          </div>
+          ${chips}
+          <h4>Vraag</h4>
+          <p>${questionText || '<span class="muted">' + DASH + '</span>'}</p>
+          <h4>Antwoord (quasi letterlijke versie)</h4>
+          <p>${answerVerbatim || '<span class="muted">' + DASH + '</span>'}</p>
+          <h4>Antwoord (gebalde versie)</h4>
+          <p>${answerText || '<span class="muted">' + DASH + '</span>'}</p>
+          <div class="question-insights">
+            <h4>Samenvatting</h4>
+            <p>${summaryHtml || 'Geen samenvatting beschikbaar.'}</p>
+            <h4>Topics</h4>
+            <div class="topic-list">${topicsMarkup}</div>
+            <h4>Acties</h4>
+            ${actionsMarkup}
+          </div>
+          <div class="answer-editor">
+            <h4>Bewerk antwoord</h4>
+            <label for="answer_verbatim_${q.id}">Quasi letterlijke weergave</label>
+            <textarea id="answer_verbatim_${q.id}" class="answer-input" data-field="answer_text_verbatim" rows="6"></textarea>
+            <label for="answer_compact_${q.id}">Gebalde versie</label>
+            <textarea id="answer_compact_${q.id}" class="answer-input" data-field="answer_text_raw" rows="6"></textarea>
+            <label for="summary_${q.id}">Samenvatting</label>
+            <textarea id="summary_${q.id}" class="answer-input" data-field="summary" rows="4"></textarea>
+            <label for="topics_${q.id}">Topics (komma gescheiden)</label>
+            <input id="topics_${q.id}" class="answer-input" data-field="topics" type="text">
+            <label for="answer_status_${q.id}">Status</label>
+            <select id="answer_status_${q.id}" class="answer-status-select" data-field="answer_status">
+              <option value="draft">Concept</option>
+              <option value="approved">Goedgekeurd</option>
+            </select>
+            <div class="answer-actions">
+              <button type="button" class="primary-btn save-answer" data-id="${q.id}">Bewaar antwoord</button>
+            </div>
+          </div>
+        `;
+        detailList.appendChild(detail);
+        const verbatimInput = detail.querySelector('textarea[data-field="answer_text_verbatim"]');
+        const compactInput = detail.querySelector('textarea[data-field="answer_text_raw"]');
+        const summaryInput = detail.querySelector('textarea[data-field="summary"]');
+        const topicsInput = detail.querySelector('input[data-field="topics"]');
+        const statusSelect = detail.querySelector('select[data-field="answer_status"]');
+        if (verbatimInput) verbatimInput.value = q.answer_text_verbatim || '';
+        if (compactInput) compactInput.value = q.answer_text_raw || '';
+        if (summaryInput) summaryInput.value = q.summary || '';
+        if (topicsInput) topicsInput.value = topicsList.join(', ');
+        if (statusSelect) statusSelect.value = answerStatus;
+        const answerSaveBtn = detail.querySelector('.save-answer');
+        if (answerSaveBtn) {
+          answerSaveBtn.addEventListener('click', async (event) => {
+            const btnEl = event.currentTarget;
+            const editor = btnEl.closest('.answer-editor');
+            const payload = {};
+            editor.querySelectorAll('[data-field]').forEach(el => {
+              const field = el.dataset.field;
+              let value = el.value;
+              if (field === 'topics') {
+                value = value.split(',').map(item => item.trim()).filter(Boolean);
+              }
+              payload[field] = value;
+            });
+            btnEl.disabled = true;
+            btnEl.textContent = 'Opslaan...';
+            const res = await fetch(`/api/questions/${q.id}`, {
+              method: 'PATCH',
+              headers: {
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify(payload)
+            });
+            btnEl.textContent = res.ok ? 'Bewaard' : 'Fout';
+            btnEl.disabled = false;
+            if (res.ok) {
+              await loadMeeting();
+              location.hash = `#question-${q.id}`;
+            } else {
+              setTimeout(() => {
+                btnEl.textContent = 'Bewaar antwoord';
+              }, 1500);
+            }
+          });
+        }
+        const regenBtn = detail.querySelector('.regen-btn');
+        if (regenBtn) {
+          regenBtn.addEventListener('click', async () => {
+            const original = regenBtn.textContent;
+            regenBtn.disabled = true;
+            regenBtn.textContent = 'Genereert...';
+            const res = await fetch(`/api/questions/${q.id}/regenerate`, {
+              method: 'POST'
+            });
+            if (res.ok) {
+              await loadMeeting();
+              location.hash = `#question-${q.id}`;
+            } else {
+              const data = await res.json().catch(() => ({}));
+              alert(data.error || 'Hergenereren mislukt.');
+              regenBtn.disabled = false;
+              regenBtn.textContent = original;
+            }
+          });
+        }
+      });
+      if (location.hash) {
+        const target = document.querySelector(location.hash);
+        if (target) {
+          target.scrollIntoView({
+            behavior: 'smooth'
+          });
+        }
+      }
+      if (window.feather && typeof window.feather.replace === 'function') {
+        window.feather.replace();
+      }
+    }
+
+    loadMeeting();
+
+    document.getElementById('questions-table').addEventListener('click', (event) => {
+      const btn = event.target.closest('.icon-btn');
+      if (!btn) return;
+      const row = btn.closest('tr');
+      const qid = row?.dataset.questionId;
+      const action = btn.dataset.action;
+      if (!qid || !action) return;
+      if (action === 'view') {
+        focusQuestionCard(qid);
+      } else if (action === 'edit') {
+        const question = currentQuestions.find(item => String(item.id) === String(qid));
+        if (question) {
+          openQuestionModal('edit', question);
+        }
+      }
+    });
+
+    document.addEventListener('click', async (e) => {
+      const btn = e.target.closest('.delete-question');
+      if (!btn) return;
+      const questionId = btn.dataset.id;
+      if (!confirm('Deze vraag verwijderen?')) return;
+      btn.disabled = true;
+      btn.textContent = '...';
+      const res = await fetch(`/api/questions/${questionId}`, {
+        method: 'DELETE'
+      });
+      if (!res.ok) {
+        alert('Verwijderen mislukt.');
+        btn.disabled = false;
+        btn.textContent = 'Verwijder';
+      } else {
+        loadMeeting();
+      }
+    });
+
+    questionForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const formData = new FormData(questionForm);
+      const payload = {};
+      formData.forEach((value, key) => {
+        payload[key] = value.trim();
+      });
+      const submitLabelCreate = 'Toevoegen';
+      const submitLabelEdit = 'Opslaan';
+      questionModalSubmit.disabled = true;
+      questionModalSubmit.textContent = modalMode === 'create' ? `${submitLabelCreate}...` : `${submitLabelEdit}...`;
+      try {
+        let response;
+        if (modalMode === 'create') {
+          payload.meeting_id = Number(meetingId);
+          response = await fetch('/api/questions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+        } else if (activeQuestionId) {
+          response = await fetch(`/api/questions/${activeQuestionId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+        }
+        if (!response || !response.ok) {
+          let errText = 'Opslaan mislukt.';
+          try {
+            const data = await response.json();
+            errText = data.error || errText;
+          } catch { /* ignore */ }
+          throw new Error(errText);
+        }
+        await loadMeeting();
+        closeQuestionModal();
+      } catch (err) {
+        alert(err.message || 'Bewerking mislukt.');
+      } finally {
+        questionModalSubmit.disabled = false;
+        questionModalSubmit.textContent = modalMode === 'create' ? submitLabelCreate : submitLabelEdit;
+      }
+    });
+  </script>
+</body>
+
+</html>

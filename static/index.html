@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="nl">
+
+<head>
+  <meta charset="utf-8">
+  <title>Quest &ndash; Upload</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+    }
+
+    .status-spinner {
+      width: 0.85rem;
+      height: 0.85rem;
+      border: 2px solid rgba(255, 255, 255, 0.4);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    .status-spinner[hidden] {
+      display: none;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <header class="topbar">
+    <div class="brand">Quest</div>
+    <nav class="nav-links">
+      <a href="/" class="active">Uploaden</a>
+      <a href="#meetings">Vergaderingen</a>
+      <a href="/questions">Zoekvragen</a>
+      <a href="/councillors">Raadsleden</a>
+    </nav>
+  </header>
+
+  <main id="main-content">
+    <section class="card">
+      <p class="eyebrow">Stap 1</p>
+      <h1 class="page-title">Upload agenda & transcript</h1>
+      <p class="muted">Kies het XML-agendapunt en de bijhorende VTT-transcriptie. Optioneel kan je een webcast-ID toevoegen.</p>
+
+      <form id="uploadForm" enctype="multipart/form-data">
+        <label>
+          Agenda.xml
+          <input type="file" name="agenda" accept=".xml" required>
+        </label>
+
+        <label>
+          Transcript.vtt
+          <input type="file" name="transcript" accept=".vtt" required>
+        </label>
+
+        <label>
+          Webcast ID
+          <input type="text" name="webcast_id" placeholder="bv. stadgent_20250210_2">
+        </label>
+
+        <button type="submit" class="primary-btn">Verwerken</button>
+      </form>
+    </section>
+
+    <section class="card" id="help">
+      <p class="eyebrow">Hoe werkt het?</p>
+      <h2>Van upload tot overzicht</h2>
+      <ol class="steps">
+        <li>Selecteer de agenda en transcriptie en klik op <strong>Verwerken</strong>.</li>
+        <li>De AI-service koppelt de vragen aan de transcriptie en slaat ze op in de databank.</li>
+        <li>Na afloop verschijnt een link naar het vergaderingsoverzicht en kan je tijden bijsturen.</li>
+      </ol>
+    </section>
+
+    <section class="card" id="resultCard" hidden>
+      <div class="result-header">
+        <span class="status-pill" id="uploadStatus" data-state="idle">
+          <span class="status-spinner" id="uploadSpinner" hidden></span>
+          <span id="uploadStatusText">Status</span>
+        </span>
+        <a id="meetingLink" class="ghost-btn" href="#" hidden>Ga naar vergadering</a>
+      </div>
+      <pre id="result">{}</pre>
+    </section>
+
+    <section class="card" id="meetings">
+      <div class="card-header">
+        <div>
+          <p class="eyebrow">Overzicht</p>
+          <h2>Recente vergaderingen</h2>
+        </div>
+        <p class="muted">Klik op een vergadering voor details of gebruik het meeting-ID.</p>
+      </div>
+      <div class="table-wrapper">
+        <table id="meetings-table">
+          <thead>
+            <tr>
+              <th>Datum</th>
+              <th>Commissie</th>
+              <th>Webcast ID</th>
+              <th>Vragen</th>
+              <th>Acties</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="meeting-empty" id="meetings-empty" hidden>Nog geen vergaderingen opgeslagen.</p>
+    </section>
+  </main>
+
+  <script>
+    const form = document.getElementById('uploadForm');
+    const result = document.getElementById('result');
+    const resultCard = document.getElementById('resultCard');
+    const meetingLink = document.getElementById('meetingLink');
+    const statusPill = document.getElementById('uploadStatus');
+    const statusText = document.getElementById('uploadStatusText');
+    const spinner = document.getElementById('uploadSpinner');
+    const statusMessages = [
+      'Documenten opladen...',
+      'Agenda analyseren...',
+      'AI koppelt transcript...',
+      'Resultaten opslaan...'
+    ];
+    let statusTimer = null;
+
+    function setStatus(state, message) {
+      statusPill.dataset.state = state;
+      statusText.textContent = message;
+      spinner.hidden = state !== 'working';
+    }
+
+    function startStatusProgress() {
+      let index = 0;
+      setStatus('working', statusMessages[index]);
+      if (statusTimer) {
+        clearInterval(statusTimer);
+      }
+      statusTimer = setInterval(() => {
+        index = (index + 1) % statusMessages.length;
+        statusText.textContent = statusMessages[index];
+      }, 3500);
+    }
+
+    function finishStatus(state, message) {
+      if (statusTimer) {
+        clearInterval(statusTimer);
+        statusTimer = null;
+      }
+      setStatus(state, message);
+    }
+    setStatus('idle', 'Status');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(form);
+
+      resultCard.hidden = false;
+      meetingLink.hidden = true;
+      startStatusProgress();
+      result.textContent = 'Documenten opladen...';
+
+      try {
+        const res = await fetch('/api/upload', {
+          method: 'POST',
+          body: fd
+        });
+
+        if (!res.ok) {
+          throw new Error('Upload mislukt.');
+        }
+
+        const data = await res.json();
+        result.textContent = JSON.stringify(data, null, 2);
+        finishStatus('success', 'Klaar');
+        meetingLink.hidden = false;
+        meetingLink.href = `/meeting/${data.meeting_id}`;
+        meetingLink.textContent = `Ga naar vergadering #${data.meeting_id}`;
+        loadMeetings();
+      } catch (err) {
+        finishStatus('error', 'Fout');
+        result.textContent = err.message || 'Onbekende fout tijdens upload.';
+      }
+    });
+
+    async function loadMeetings() {
+      const res = await fetch('/api/meetings');
+      const tbody = document.querySelector('#meetings-table tbody');
+      const empty = document.getElementById('meetings-empty');
+
+      if (!res.ok) {
+        tbody.innerHTML = '';
+        empty.hidden = false;
+        empty.textContent = 'Kon vergaderingen niet laden.';
+        return;
+      }
+
+      const data = await res.json();
+      const meetings = data.meetings || [];
+      tbody.innerHTML = '';
+
+      if (!meetings.length) {
+        empty.hidden = false;
+        empty.textContent = 'Nog geen vergaderingen opgeslagen.';
+        return;
+      }
+
+      empty.hidden = true;
+
+      meetings.forEach(m => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${m.meeting_date || ''}</td>
+          <td>${m.commission_name || ''}</td>
+          <td>${m.webcast_id || '\u2013'}</td>
+          <td>${m.question_count || 0}</td>
+          <td class="table-actions">
+            <a class="detail-link" href="/meeting/${m.id}">Details</a>
+            <button type="button" class="danger-btn delete-meeting" data-id="${m.id}">Verwijder</button>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    loadMeetings();
+
+    document.getElementById('meetings-table').addEventListener('click', async (e) => {
+      const btn = e.target.closest('.delete-meeting');
+      if (!btn) return;
+      const meetingId = btn.dataset.id;
+      if (!confirm(`Vergadering #${meetingId} verwijderen?`)) {
+        return;
+      }
+      btn.disabled = true;
+      const original = btn.textContent;
+      btn.textContent = '...';
+      const res = await fetch(`/api/meetings/${meetingId}`, { method: 'DELETE' });
+      if (!res.ok) {
+        alert('Verwijderen mislukt.');
+      } else {
+        loadMeetings();
+      }
+      btn.disabled = false;
+      btn.textContent = original;
+    });
+  </script>
+</body>
+
+</html>

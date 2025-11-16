@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="nl">
+
+<head>
+  <meta charset="utf-8">
+  <title>Quest &ndash; Zoekvragen</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .result-list {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+
+    .result-card {
+      border: 1px solid #e2e8f0;
+      border-radius: 0.75rem;
+      padding: 1rem;
+      background: #fff;
+      box-shadow: 0 4px 20px rgba(15, 23, 42, 0.05);
+    }
+
+    .result-card h3 {
+      margin: 0;
+      font-size: 1.05rem;
+    }
+
+    .result-card h3 a {
+      color: #0f172a;
+      text-decoration: none;
+    }
+
+    .result-card h3 a:hover {
+      text-decoration: underline;
+    }
+
+    .inline-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      margin: 0.4rem 0 0.6rem;
+      font-size: 0.85rem;
+      color: #475569;
+    }
+
+    .inline-meta span {
+      font-weight: 600;
+      color: #0f172a;
+    }
+
+    .search-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 0.75rem;
+      margin-top: 0.5rem;
+    }
+
+    .topic-row {
+      margin-top: 0.6rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+    }
+
+    .topic-pill {
+      display: inline-block;
+      padding: 0.25rem 0.8rem;
+      border-radius: 999px;
+      background: #eef2ff;
+      color: #312e81;
+      font-size: 0.85rem;
+      text-decoration: none;
+    }
+
+    .topic-pill:hover {
+      background: #c7d2fe;
+    }
+
+    .icon-btn {
+      border: none;
+      background: none;
+      padding: 0.15rem;
+    }
+  </style>
+</head>
+
+<body>
+  <header class="topbar">
+    <div class="brand">Quest</div>
+    <nav class="nav-links">
+      <a href="/">Uploaden</a>
+      <a href="/#meetings">Vergaderingen</a>
+      <a href="/questions" class="active">Zoekvragen</a>
+      <a href="/councillors">Raadsleden</a>
+    </nav>
+  </header>
+
+  <main id="main-content">
+    <section class="card">
+      <div class="card-header">
+        <div>
+          <p class="eyebrow">Overzicht</p>
+          <h1 class="page-title">Vragen per raadslid of schepen</h1>
+        </div>
+        <p class="muted">Kies een naam en bekijk alle bijhorende vragen. Klik in de resultaten door naar de vergadering.</p>
+      </div>
+      <form id="personForm">
+        <div class="search-grid">
+          <label>
+            Raadslid
+            <input id="submitterInput" name="submitter" list="submitterOptions" placeholder="bv. Sarah Acke">
+            <datalist id="submitterOptions"></datalist>
+          </label>
+          <label>
+            Schepen
+            <input id="assigneeInput" name="assignee" list="assigneeOptions" placeholder="bv. Schepen Peeters">
+            <datalist id="assigneeOptions"></datalist>
+          </label>
+        </div>
+        <div style="margin-top:0.75rem;">
+          <button type="submit" class="primary-btn">Zoek vragen</button>
+          <button type="button" class="ghost-btn" id="resetPersonBtn">Reset</button>
+        </div>
+      </form>
+      <div class="result-list" id="personResults"></div>
+    </section>
+
+    <section class="card">
+      <div class="card-header">
+        <div>
+          <p class="eyebrow">Topics</p>
+          <h2>Zoek op onderwerp</h2>
+        </div>
+        <p class="muted">Typ een topic of kies een suggestie en bekijk alle vragen waar het voorkomt.</p>
+      </div>
+      <form id="topicForm">
+        <div class="search-grid">
+          <label style="grid-column: 1 / -1;">
+            Topic
+            <input id="topicInput" list="topicOptions" placeholder="bv. mobiliteit">
+            <datalist id="topicOptions"></datalist>
+          </label>
+        </div>
+        <div style="margin-top:0.75rem;">
+          <button type="submit" class="primary-btn">Zoek op topic</button>
+          <button type="button" class="ghost-btn" id="resetTopicBtn">Reset</button>
+        </div>
+      </form>
+      <div class="result-list" id="topicResults"></div>
+    </section>
+  </main>
+
+  <script src="https://unpkg.com/feather-icons"></script>
+  <script>
+    const personForm = document.getElementById('personForm');
+    const topicForm = document.getElementById('topicForm');
+    const personResults = document.getElementById('personResults');
+    const topicResults = document.getElementById('topicResults');
+    const submitterInput = document.getElementById('submitterInput');
+    const assigneeInput = document.getElementById('assigneeInput');
+    const topicInput = document.getElementById('topicInput');
+    const submitterOptions = document.getElementById('submitterOptions');
+    const assigneeOptions = document.getElementById('assigneeOptions');
+    const topicOptions = document.getElementById('topicOptions');
+    const resetPersonBtn = document.getElementById('resetPersonBtn');
+    const resetTopicBtn = document.getElementById('resetTopicBtn');
+    const DASH = '—';
+
+    const htmlEscape = (value) => {
+      if (value === null || value === undefined) return '';
+      return String(value).replace(/[&<>"']/g, (ch) => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      }[ch]));
+    };
+
+    function formatTimeRange(question) {
+      const start = question.question_start_time || question.answer_start_time || '';
+      const end = question.question_end_time || question.answer_end_time || '';
+      if (!start && !end) return DASH;
+      return `${start || DASH} – ${end || DASH}`;
+    }
+
+    function buildPersonLink(name, key) {
+      if (!name) return DASH;
+      const url = `/questions?${key}=${encodeURIComponent(name)}`;
+      return `<a href="${url}">${htmlEscape(name)}</a>`;
+    }
+
+    function buildTopicTags(topics) {
+      if (!topics || !topics.length) return '<span class="muted">Geen topics</span>';
+      return topics.map((topic) => {
+        const safe = htmlEscape(topic);
+        const url = `/questions?topic=${encodeURIComponent(topic)}`;
+        return `<a class="topic-pill" href="${url}">${safe}</a>`;
+      }).join('');
+    }
+
+    async function loadFilterOptions() {
+      const res = await fetch('/api/question-people');
+      if (!res.ok) return;
+      const data = await res.json();
+      (data.submitters || []).forEach(name => {
+        const option = document.createElement('option');
+        option.value = name;
+        submitterOptions.appendChild(option);
+      });
+      (data.assignees || []).forEach(name => {
+        const option = document.createElement('option');
+        option.value = name;
+        assigneeOptions.appendChild(option);
+      });
+      (data.topics || []).forEach(topic => {
+        const option = document.createElement('option');
+        option.value = topic;
+        topicOptions.appendChild(option);
+      });
+    }
+
+    function renderQuestions(container, questions, emptyMessage) {
+      container.innerHTML = '';
+      if (!questions || !questions.length) {
+        container.innerHTML = `<p class="muted">${emptyMessage}</p>`;
+        return;
+      }
+      questions.forEach((q) => {
+        const meetingInfo = `${htmlEscape(q.commission_name || 'Onbekend')} – ${htmlEscape(q.meeting_date || '')}`;
+        const submitterLink = buildPersonLink(q.submitter_full_name || '', 'submitter');
+        const assigneeLink = buildPersonLink(q.assignee_full_name || q.assignee_label || '', 'assignee');
+        const summary = q.summary || q.answer_text_raw || q.question_text_raw || '';
+        const snippet = summary ? htmlEscape(summary).slice(0, 400) : DASH;
+        const topicsMarkup = buildTopicTags(q.topics || []);
+        const url = q.question_url || `/meeting/${q.meeting_id}#question-${q.id}`;
+        const title = htmlEscape(q.title || q.subject || 'Vraag');
+        const sequence = q.sequence_nr ? `Vraag ${htmlEscape(q.sequence_nr)}` : '';
+        const timeLabel = formatTimeRange(q);
+
+        const article = document.createElement('article');
+        article.className = 'result-card';
+        article.innerHTML = `
+          <div>
+            <p class="eyebrow">${meetingInfo}</p>
+            <h3><a href="${url}">${title}</a></h3>
+            <p class="muted">${sequence}</p>
+          </div>
+          <div class="inline-meta">
+            <div><span>Raadslid</span> ${submitterLink}</div>
+            <div><span>Schepen</span> ${assigneeLink}</div>
+            <div><span>Tijd</span> ${timeLabel}</div>
+          </div>
+          <p>${snippet || DASH}</p>
+          <div class="topic-row">${topicsMarkup}</div>
+        `;
+        container.appendChild(article);
+      });
+      if (window.feather && typeof window.feather.replace === 'function') {
+        window.feather.replace();
+      }
+    }
+
+    async function performSearch(params) {
+      const url = new URL('/api/questions/search', window.location.origin);
+      Object.entries(params).forEach(([key, value]) => {
+        if (value) url.searchParams.set(key, value);
+      });
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Zoekopdracht mislukt.');
+      return res.json();
+    }
+
+    function updateQueryParams(newValues) {
+      const params = new URLSearchParams(window.location.search);
+      ['submitter', 'assignee', 'topic'].forEach(key => {
+        if (newValues[key]) {
+          params.set(key, newValues[key]);
+        } else {
+          params.delete(key);
+        }
+      });
+      const query = params.toString();
+      const newUrl = query ? `${window.location.pathname}?${query}` : window.location.pathname;
+      history.replaceState(null, '', newUrl);
+    }
+
+    personForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const submitter = submitterInput.value.trim();
+      const assignee = assigneeInput.value.trim();
+      updateQueryParams({ submitter, assignee, topic: topicInput.value.trim() || undefined });
+      if (!submitter && !assignee) {
+        personResults.innerHTML = '<p class="muted">Vul een raadslid of schepen in.</p>';
+        return;
+      }
+      try {
+        const data = await performSearch({ submitter, assignee });
+        renderQuestions(personResults, data.questions, 'Geen vragen gevonden voor deze persoon.');
+      } catch (err) {
+        personResults.innerHTML = `<p class="muted">${err.message || 'Zoekopdracht mislukt.'}</p>`;
+      }
+    });
+
+    resetPersonBtn.addEventListener('click', () => {
+      submitterInput.value = '';
+      assigneeInput.value = '';
+      updateQueryParams({ submitter: undefined, assignee: undefined, topic: topicInput.value.trim() || undefined });
+      personResults.innerHTML = '<p class="muted">Selecteer een raadslid of schepen en start een zoekopdracht.</p>';
+    });
+
+    topicForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const topic = topicInput.value.trim();
+      updateQueryParams({ submitter: submitterInput.value.trim() || undefined, assignee: assigneeInput.value.trim() || undefined, topic });
+      if (!topic) {
+        topicResults.innerHTML = '<p class="muted">Typ een topic.</p>';
+        return;
+      }
+      try {
+        const data = await performSearch({ topic });
+        renderQuestions(topicResults, data.questions, 'Geen vragen gevonden voor dit topic.');
+      } catch (err) {
+        topicResults.innerHTML = `<p class="muted">${err.message || 'Zoekopdracht mislukt.'}</p>`;
+      }
+    });
+
+    resetTopicBtn.addEventListener('click', () => {
+      topicInput.value = '';
+      updateQueryParams({ submitter: submitterInput.value.trim() || undefined, assignee: assigneeInput.value.trim() || undefined, topic: undefined });
+      topicResults.innerHTML = '<p class="muted">Selecteer of typ een topic om te zoeken.</p>';
+    });
+
+    function applyDeepLinks() {
+      const params = new URLSearchParams(window.location.search);
+      const submitter = params.get('submitter') || '';
+      const assignee = params.get('assignee') || '';
+      const topic = params.get('topic') || '';
+      if (submitter) submitterInput.value = submitter;
+      if (assignee) assigneeInput.value = assignee;
+      if (topic) topicInput.value = topic;
+
+      if (submitter || assignee) {
+        personForm.dispatchEvent(new Event('submit', { cancelable: true }));
+      }
+      if (topic) {
+        topicForm.dispatchEvent(new Event('submit', { cancelable: true }));
+      }
+    }
+
+    loadFilterOptions().then(applyDeepLinks);
+  </script>
+</body>
+
+</html>
