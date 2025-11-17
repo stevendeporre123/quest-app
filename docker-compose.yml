@@ -1,9 +1,6 @@
-version: "3.9"
-
 services:
   quest:
-    build: .
-    image: quest-app:latest
+    image: ghcr.io/stevendeporre123/quest-app:latest
     restart: unless-stopped
     env_file:
       - .env
