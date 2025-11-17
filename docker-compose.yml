@@ -1,6 +1,6 @@
 services:
   quest:
-    image: ghcr.io/stevendeporre123/quest-app:latest
+    image: ghcr.io/stevendeporre123/quest-app:${QUEST_IMAGE_TAG:-main}
     restart: unless-stopped
     environment:
       QUEST_DB_PATH: /data/quest.db

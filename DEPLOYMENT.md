@@ -16,7 +16,7 @@ This document describes how to build and run Quest inside Docker and how to publ
 docker compose build
 ```
 
-The Dockerfile installs the requirements and defaults `QUEST_DB_PATH` to `/data/quest.db`. The `/data` directory is exposed as a volume so the SQLite database and uploaded source files survive container restarts.
+The Dockerfile installs the requirements and defaults `QUEST_DB_PATH` to `/data/quest.db`. The `/data` directory is exposed as a volume so the SQLite database and uploaded source files survive container restarts. The compose file also references the published image `ghcr.io/stevendeporre123/quest-app:${QUEST_IMAGE_TAG:-main}` so Portainer and other orchestrators can pull a ready-made build. If you need a different tag, set `QUEST_IMAGE_TAG` in your stack (for example `QUEST_IMAGE_TAG=v1.2.3`).
 
 ## 3. Persistent storage
 
@@ -45,10 +45,12 @@ The container only needs an `OPENAI_API_KEY` besides the `QUEST_*` paths defined
 in `docker-compose.yml`. Supply it via whatever mechanism fits your deployment:
 
 - When running `docker compose` directly, add it to a local `.env` file so
-  Compose can interpolate `${OPENAI_API_KEY}` inside the service definition.
+  Compose can interpolate `${OPENAI_API_KEY}` (and optionally `QUEST_IMAGE_TAG`)
+  inside the service definition.
 - When running the stack inside Portainer (or another orchestrator), configure
-  `OPENAI_API_KEY` in the environment variable editor. The compose file already
-  exposes it through the `environment` section, so no `.env` file is required.
+  `OPENAI_API_KEY` (and optionally `QUEST_IMAGE_TAG`) in the environment
+  variable editor. The compose file already exposes them through the
+  `environment` section, so no `.env` file is required.
 
 Add any future secrets to the compose file in the same fashion so they can be
 overridden either by `.env` or by the orchestration layer.
