@@ -63,6 +63,46 @@ def _deserialize_question_row(row):
     return data
 
 
+QUESTION_INSERT_COLUMNS = [
+    "meeting_id",
+    "dossier_id",
+    "dossier_year_nr",
+    "sequence_nr",
+    "title",
+    "subject",
+    "roi_type",
+    "submitter_given_name",
+    "submitter_family_name",
+    "submitter_faction",
+    "assignee_label",
+    "assignee_given_name",
+    "assignee_family_name",
+    "question_start_time",
+    "question_end_time",
+    "answer_start_time",
+    "answer_end_time",
+    "reply_start_time",
+    "reply_end_time",
+    "question_text_raw",
+    "answer_text_verbatim",
+    "answer_text_raw",
+    "question_text_xml",
+    "summary",
+    "actions_json",
+    "topics_json",
+    "note",
+    "answer_status",
+]
+
+QUESTION_INSERT_SQL = (
+    "INSERT INTO questions ("
+    + ", ".join(QUESTION_INSERT_COLUMNS)
+    + ") VALUES ("
+    + ",".join(["?"] * len(QUESTION_INSERT_COLUMNS))
+    + ")"
+)
+
+
 @app.on_event("startup")
 def startup_event():
     init_db()
@@ -213,28 +253,27 @@ async def upload(
 
     for idx, q in enumerate(items):
         cur.execute(
-            """INSERT INTO questions (
-                meeting_id,
-                dossier_id, dossier_year_nr, sequence_nr,
-                title, subject, roi_type,
-                submitter_given_name, submitter_family_name, submitter_faction,
-                assignee_label, assignee_given_name, assignee_family_name,
-                question_start_time, question_end_time,
-                answer_start_time, answer_end_time,
-                reply_start_time, reply_end_time,
-                question_text_raw, answer_text_verbatim, answer_text_raw,
-                question_text_xml,
-                summary, actions_json, topics_json, note, answer_status
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            QUESTION_INSERT_SQL,
             (
                 meeting_id,
-                q.get("dossier_id"), q.get("dossier_year_nr"), q.get("sequence_nr"),
-                q.get("title"), q.get("subject"), q.get("roi_type"),
-                q.get("submitter_given_name"), q.get("submitter_family_name"), q.get("submitter_faction"),
-                q.get("assignee_label"), q.get("assignee_given_name"), q.get("assignee_family_name"),
-                q.get("question_start_time"), q.get("question_end_time"),
-                q.get("answer_start_time"), q.get("answer_end_time"),
-                "", "",  # reply_start_time, reply_end_time voorlopig leeg
+                q.get("dossier_id"),
+                q.get("dossier_year_nr"),
+                q.get("sequence_nr"),
+                q.get("title"),
+                q.get("subject"),
+                q.get("roi_type"),
+                q.get("submitter_given_name"),
+                q.get("submitter_family_name"),
+                q.get("submitter_faction"),
+                q.get("assignee_label"),
+                q.get("assignee_given_name"),
+                q.get("assignee_family_name"),
+                q.get("question_start_time"),
+                q.get("question_end_time"),
+                q.get("answer_start_time"),
+                q.get("answer_end_time"),
+                "",
+                "",
                 q.get("question_text_raw"),
                 q.get("answer_text_verbatim", q.get("answer_text_raw", "")),
                 q.get("answer_text_raw"),
@@ -362,19 +401,7 @@ async def create_question(payload: QuestionCreate):
         sequence_nr = str(max_seq + 1)
 
     cur.execute(
-        """INSERT INTO questions (
-            meeting_id,
-            dossier_id, dossier_year_nr, sequence_nr,
-            title, subject, roi_type,
-            submitter_given_name, submitter_family_name, submitter_faction,
-            assignee_label, assignee_given_name, assignee_family_name,
-            question_start_time, question_end_time,
-            answer_start_time, answer_end_time,
-            reply_start_time, reply_end_time,
-            question_text_raw, answer_text_verbatim, answer_text_raw,
-            question_text_xml,
-            summary, actions_json, topics_json, note, answer_status
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        QUESTION_INSERT_SQL,
         (
             payload.meeting_id,
             payload.dossier_id,
