@@ -1,53 +1,25 @@
 <!doctype html>
 <html lang="nl">
-
 <head>
   <meta charset="utf-8">
-  <title>Quest &ndash; Upload</title>
+  <title>Quest – Upload</title>
   <link rel="stylesheet" href="/static/style.css">
-  <style>
-    .status-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
-    }
-
-    .status-spinner {
-      width: 0.85rem;
-      height: 0.85rem;
-      border: 2px solid rgba(255, 255, 255, 0.4);
-      border-top-color: #fff;
-      border-radius: 50%;
-      animation: spin 0.8s linear infinite;
-    }
-
-    .status-spinner[hidden] {
-      display: none;
-    }
-
-    @keyframes spin {
-      to {
-        transform: rotate(360deg);
-      }
-    }
-  </style>
 </head>
-
 <body>
   <header class="topbar">
     <div class="brand">Quest</div>
     <nav class="nav-links">
       <a href="/" class="active">Uploaden</a>
       <a href="#meetings">Vergaderingen</a>
-      <a href="/questions">Zoekvragen</a>
-      <a href="/councillors">Raadsleden</a>
+      <a href="#councillors">Raadsleden</a>
+      <button type="button" class="nav-btn" id="openMeetingBtn">Open vergadering…</button>
     </nav>
   </header>
 
   <main id="main-content">
     <section class="card">
       <p class="eyebrow">Stap 1</p>
-      <h1 class="page-title">Upload agenda & transcript</h1>
+      <h1 class="page-title">Upload Agenda & Transcript</h1>
       <p class="muted">Kies het XML-agendapunt en de bijhorende VTT-transcriptie. Optioneel kan je een webcast-ID toevoegen.</p>
 
       <form id="uploadForm" enctype="multipart/form-data">
@@ -75,17 +47,14 @@
       <h2>Van upload tot overzicht</h2>
       <ol class="steps">
         <li>Selecteer de agenda en transcriptie en klik op <strong>Verwerken</strong>.</li>
-        <li>De AI-service koppelt de vragen aan de transcriptie en slaat ze op in de databank.</li>
+        <li>De AI service koppelt de vragen aan de transcriptie en slaat ze op in de database.</li>
         <li>Na afloop verschijnt een link naar het vergaderingsoverzicht en kan je tijden bijsturen.</li>
       </ol>
     </section>
 
     <section class="card" id="resultCard" hidden>
       <div class="result-header">
-        <span class="status-pill" id="uploadStatus" data-state="idle">
-          <span class="status-spinner" id="uploadSpinner" hidden></span>
-          <span id="uploadStatusText">Status</span>
-        </span>
+        <span class="status-pill" id="uploadStatus" data-state="idle">Status</span>
         <a id="meetingLink" class="ghost-btn" href="#" hidden>Ga naar vergadering</a>
       </div>
       <pre id="result">{}</pre>
@@ -107,6 +76,7 @@
               <th>Commissie</th>
               <th>Webcast ID</th>
               <th>Vragen</th>
+              <th>Status</th>
               <th>Acties</th>
             </tr>
           </thead>
@@ -114,6 +84,31 @@
         </table>
       </div>
       <p class="meeting-empty" id="meetings-empty" hidden>Nog geen vergaderingen opgeslagen.</p>
+    </section>
+
+    <section class="card" id="councillors">
+      <div class="card-header">
+        <div>
+          <p class="eyebrow">Raadsleden</p>
+          <h2>Beheer namen & titels</h2>
+        </div>
+        <p class="muted">Gebruik deze lijst om naamvarianten in antwoorden consistent te houden.</p>
+      </div>
+      <div class="table-wrapper">
+        <table id="councillors-table">
+          <thead>
+            <tr>
+              <th>Voornaam</th>
+              <th>Achternaam</th>
+              <th>Naam met titel</th>
+              <th>Foute schrijfwijzen</th>
+              <th>Acties</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="meeting-empty" id="councillors-empty" hidden>Geen raadsleden beschikbaar.</p>
     </section>
   </main>
 
@@ -123,42 +118,22 @@
     const resultCard = document.getElementById('resultCard');
     const meetingLink = document.getElementById('meetingLink');
     const statusPill = document.getElementById('uploadStatus');
-    const statusText = document.getElementById('uploadStatusText');
-    const spinner = document.getElementById('uploadSpinner');
-    const statusMessages = [
-      'Documenten opladen...',
-      'Agenda analyseren...',
-      'AI koppelt transcript...',
-      'Resultaten opslaan...'
-    ];
-    let statusTimer = null;
+    const meetingBtn = document.getElementById('openMeetingBtn');
 
-    function setStatus(state, message) {
-      statusPill.dataset.state = state;
-      statusText.textContent = message;
-      spinner.hidden = state !== 'working';
+    function formatMeetingStatus(meeting) {
+      const state = (meeting.processing_state || '').toLowerCase() || 'pending';
+      const totalQuestions = Number(meeting.total_questions ?? meeting.question_count ?? 0) || 0;
+      const processed = Number(meeting.processed_questions ?? 0) || 0;
+      const labels = {
+        completed: 'Klaar',
+        processing: 'Bezig',
+        pending: 'Wacht',
+        error: 'Fout'
+      };
+      const label = labels[state] || 'Onbekend';
+      const progress = totalQuestions ? `${Math.min(processed, totalQuestions)}/${totalQuestions}` : `${processed}`;
+      return { state, label, progress };
     }
-
-    function startStatusProgress() {
-      let index = 0;
-      setStatus('working', statusMessages[index]);
-      if (statusTimer) {
-        clearInterval(statusTimer);
-      }
-      statusTimer = setInterval(() => {
-        index = (index + 1) % statusMessages.length;
-        statusText.textContent = statusMessages[index];
-      }, 3500);
-    }
-
-    function finishStatus(state, message) {
-      if (statusTimer) {
-        clearInterval(statusTimer);
-        statusTimer = null;
-      }
-      setStatus(state, message);
-    }
-    setStatus('idle', 'Status');
 
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -166,29 +141,48 @@
 
       resultCard.hidden = false;
       meetingLink.hidden = true;
-      startStatusProgress();
-      result.textContent = 'Documenten opladen...';
+      statusPill.dataset.state = 'working';
+      statusPill.textContent = 'Verwerken…';
+      result.textContent = 'Bestanden uploaden…';
 
       try {
         const res = await fetch('/api/upload', {
           method: 'POST',
           body: fd
         });
-
-        if (!res.ok) {
-          throw new Error('Upload mislukt.');
-        }
-
         const data = await res.json();
         result.textContent = JSON.stringify(data, null, 2);
-        finishStatus('success', 'Klaar');
-        meetingLink.hidden = false;
-        meetingLink.href = `/meeting/${data.meeting_id}`;
-        meetingLink.textContent = `Ga naar vergadering #${data.meeting_id}`;
-        loadMeetings();
+
+        if (res.ok) {
+          if (data.status === 'completed') {
+            statusPill.dataset.state = 'ok';
+            statusPill.textContent = 'Klaar';
+          } else {
+            statusPill.dataset.state = 'working';
+            statusPill.textContent = 'Verwerking gestart';
+          }
+          loadMeetings();
+        } else {
+          statusPill.dataset.state = 'error';
+          statusPill.textContent = 'Mislukt';
+        }
+
+        if (data.meeting_id) {
+          meetingLink.hidden = false;
+          meetingLink.href = `/meeting/${data.meeting_id}`;
+          meetingLink.textContent = `Ga naar vergadering #${data.meeting_id}`;
+        }
       } catch (err) {
-        finishStatus('error', 'Fout');
-        result.textContent = err.message || 'Onbekende fout tijdens upload.';
+        statusPill.dataset.state = 'error';
+        statusPill.textContent = 'Fout';
+        result.textContent = err.message;
+      }
+    });
+
+    meetingBtn?.addEventListener('click', () => {
+      const id = prompt('Geef het meeting-ID in dat je wil openen:');
+      if (id) {
+        window.location.href = `/meeting/${id.trim()}`;
       }
     });
 
@@ -198,31 +192,35 @@
       const empty = document.getElementById('meetings-empty');
 
       if (!res.ok) {
-        tbody.innerHTML = '';
         empty.hidden = false;
         empty.textContent = 'Kon vergaderingen niet laden.';
         return;
       }
 
       const data = await res.json();
-      const meetings = data.meetings || [];
       tbody.innerHTML = '';
 
-      if (!meetings.length) {
+      if (!data.meetings.length) {
         empty.hidden = false;
-        empty.textContent = 'Nog geen vergaderingen opgeslagen.';
         return;
       }
 
       empty.hidden = true;
 
-      meetings.forEach(m => {
+      data.meetings.forEach(m => {
+        const statusInfo = formatMeetingStatus(m);
+        const totalQuestions = Number(m.total_questions ?? m.question_count ?? 0) || 0;
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td>${m.meeting_date || ''}</td>
           <td>${m.commission_name || ''}</td>
-          <td>${m.webcast_id || '\u2013'}</td>
-          <td>${m.question_count || 0}</td>
+          <td>${m.webcast_id || '-'}</td>
+          <td>${totalQuestions}</td>
+          <td>
+            <span class="status-pill" data-state="${statusInfo.state}">
+              ${statusInfo.label}${statusInfo.progress ? ` (${statusInfo.progress})` : ''}
+            </span>
+          </td>
           <td class="table-actions">
             <a class="detail-link" href="/meeting/${m.id}">Details</a>
             <button type="button" class="danger-btn delete-meeting" data-id="${m.id}">Verwijder</button>
@@ -242,7 +240,6 @@
         return;
       }
       btn.disabled = true;
-      const original = btn.textContent;
       btn.textContent = '...';
       const res = await fetch(`/api/meetings/${meetingId}`, { method: 'DELETE' });
       if (!res.ok) {
@@ -250,10 +247,103 @@
       } else {
         loadMeetings();
       }
-      btn.disabled = false;
-      btn.textContent = original;
+    });
+
+    async function loadCouncillors() {
+      const res = await fetch('/api/councillors');
+      const tbody = document.querySelector('#councillors-table tbody');
+      const empty = document.getElementById('councillors-empty');
+
+      if (!res.ok) {
+        empty.hidden = false;
+        empty.textContent = 'Kon raadsleden niet laden.';
+        return;
+      }
+
+      const data = await res.json();
+      const list = data.councillors || [];
+      tbody.innerHTML = '';
+
+      const newRow = document.createElement('tr');
+      newRow.dataset.id = 'new';
+      newRow.innerHTML = `
+        <td><input name="given_name" placeholder="Voornaam"></td>
+        <td><input name="family_name" placeholder="Achternaam"></td>
+        <td><input name="name_with_title" placeholder="bv. schepen Janssens"></td>
+        <td><input name="wrong_spellings" placeholder="Naamvarianten"></td>
+        <td><button class="save-btn" data-action="create">Toevoegen</button></td>
+      `;
+      tbody.appendChild(newRow);
+
+      list.forEach(c => {
+        const tr = document.createElement('tr');
+        tr.dataset.id = c.id;
+        tr.innerHTML = `
+          <td><input name="given_name" value="${c.given_name || ''}"></td>
+          <td><input name="family_name" value="${c.family_name || ''}"></td>
+          <td><input name="name_with_title" value="${c.name_with_title || ''}"></td>
+          <td><input name="wrong_spellings" value="${c.wrong_spellings || ''}"></td>
+          <td class="table-actions">
+            <button class="save-btn" data-action="save">Opslaan</button>
+            <button class="danger-btn" data-action="delete">Verwijder</button>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      });
+
+      empty.hidden = list.length > 0;
+    }
+
+    loadCouncillors();
+
+    document.getElementById('councillors-table').addEventListener('click', async (e) => {
+      const btn = e.target.closest('button');
+      if (!btn) return;
+      const action = btn.dataset.action;
+      const row = btn.closest('tr');
+      if (!action || !row) return;
+
+      const payload = {};
+      row.querySelectorAll('input').forEach(inp => {
+        payload[inp.name] = inp.value.trim();
+      });
+
+      btn.disabled = true;
+      const originalText = btn.textContent;
+
+      try {
+        if (action === 'create') {
+          btn.textContent = 'Toevoegen…';
+          const res = await fetch('/api/councillors', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          if (!res.ok) throw new Error('Mislukt');
+        } else if (action === 'save') {
+          btn.textContent = 'Opslaan…';
+          const id = row.dataset.id;
+          const res = await fetch(`/api/councillors/${id}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          if (!res.ok) throw new Error('Mislukt');
+        } else if (action === 'delete') {
+          const id = row.dataset.id;
+          if (!confirm('Deze persoon verwijderen?')) return;
+          btn.textContent = 'Verwijderen…';
+          const res = await fetch(`/api/councillors/${id}`, { method: 'DELETE' });
+          if (!res.ok) throw new Error('Mislukt');
+        }
+        loadCouncillors();
+      } catch (err) {
+        alert(err.message || 'Bewerking mislukt.');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
     });
   </script>
 </body>
-
 </html>

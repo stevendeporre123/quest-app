@@ -92,6 +92,12 @@ QUESTION_INSERT_COLUMNS = [
     "topics_json",
     "note",
     "answer_status",
+    "processing_state",
+    "processing_error",
+    "processing_started_at",
+    "processing_completed_at",
+    "processing_attempts",
+    "source_question_idx",
 ]
 
 QUESTION_INSERT_SQL = (
@@ -202,42 +208,18 @@ async def upload(
         meeting_date,
         commission_name,
     )
-    councillors = list_councillors(conn)
-    logger.info("Calling OpenAI alignment for %d questions", len(oral_questions))
-    ai_items = align_questions_with_vtt(oral_questions, vtt_str, councillors)
-    items_by_id = {}
-    for idx, item in enumerate(ai_items):
-        key = item.get("dossier_id") or item.get("id") or f"idx-{idx}"
-        if key:
-            items_by_id[key] = item
-
-    items = []
-    for idx, original in enumerate(oral_questions):
-        key = original.get("dossier_id") or f"idx-{idx}"
-        item = items_by_id.get(key)
-        if not item:
-            item = {
-                **original,
-                "question_start_time": "",
-                "question_end_time": "",
-                "answer_start_time": "",
-                "answer_end_time": "",
-                "question_text_raw": original.get("question_text_from_xml", ""),
-                "answer_text_verbatim": "",
-                "answer_text_raw": "",
-                "summary": "",
-                "actions": [],
-                "topics": [],
-                "answer_status": "draft",
-                "note": "Automatisch toegevoegd: geen AI-resultaat beschikbaar.",
-            }
-        items.append(item)
-    logger.info("OpenAI returned %d aligned items", len(items))
 
     cur = conn.cursor()
-
+    processing_started_at = datetime.utcnow().isoformat()
+    initial_state = "processing" if oral_questions else "completed"
     cur.execute(
-        "INSERT INTO meetings (meeting_date, commission_name, webcast_id, source_questions_json, transcript_text, agenda_file_path, transcript_file_path) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        """INSERT INTO meetings (
+            meeting_date, commission_name, webcast_id,
+            source_questions_json, transcript_text,
+            agenda_file_path, transcript_file_path,
+            processing_state, processing_started_at,
+            total_questions, processed_questions, processing_error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             meeting_date,
             commission_name,
@@ -246,12 +228,19 @@ async def upload(
             vtt_str,
             str(agenda_path),
             str(transcript_path),
+            initial_state,
+            processing_started_at if oral_questions else None,
+            len(oral_questions),
+            0,
+            "",
         ),
     )
     meeting_id = cur.lastrowid
     logger.info("Stored meeting id=%s", meeting_id)
 
-    for idx, q in enumerate(items):
+    question_db_ids = {}
+    for idx, q in enumerate(oral_questions):
+        key = q.get("dossier_id") or f"idx-{idx}"
         cur.execute(
             QUESTION_INSERT_SQL,
             (
@@ -268,41 +257,201 @@ async def upload(
                 q.get("assignee_label"),
                 q.get("assignee_given_name"),
                 q.get("assignee_family_name"),
-                q.get("question_start_time"),
-                q.get("question_end_time"),
-                q.get("answer_start_time"),
-                q.get("answer_end_time"),
                 "",
                 "",
-                q.get("question_text_raw"),
-                q.get("answer_text_verbatim", q.get("answer_text_raw", "")),
-                q.get("answer_text_raw"),
-                question_lookup.get(
-                    q.get("dossier_id"),
-                    question_lookup.get(f"idx-{idx}", {}),
-                ).get("question_text_from_xml", ""),
-                q.get("summary"),
-                json.dumps(q.get("actions", []), ensure_ascii=False),
-                json.dumps(q.get("topics", []), ensure_ascii=False),
-                q.get("note", ""),
-                (q.get("answer_status") or "draft"),
+                "",
+                "",
+                "",
+                "",
+                q.get("question_text_from_xml", ""),
+                "",
+                "",
+                q.get("question_text_from_xml", ""),
+                "",
+                json.dumps([], ensure_ascii=False),
+                json.dumps([], ensure_ascii=False),
+                "Ingeladen vanuit XML, wacht op verwerking.",
+                "draft",
+                "pending",
+                "",
+                None,
+                None,
+                0,
+                idx,
             ),
         )
+        question_db_ids[key] = cur.lastrowid
         logger.info(
-            "Stored question sequence_nr=%s (db id=%s)",
+            "Stored placeholder for question sequence_nr=%s (db id=%s)",
             q.get("sequence_nr"),
             cur.lastrowid,
         )
 
     conn.commit()
-    conn.close()
-    logger.info(
-        "Upload finished meeting_id=%s questions=%d",
-        meeting_id,
-        len(items),
-    )
 
-    return {"status": "ok", "meeting_id": meeting_id, "questions": len(items)}
+    councillors = list_councillors(conn)
+    processed_questions = 0
+    processing_completed_at = None
+    processing_error = ""
+    question_process_started = datetime.utcnow().isoformat() if oral_questions else None
+    try:
+        if oral_questions:
+            logger.info("Calling OpenAI alignment for %d questions", len(oral_questions))
+            ai_items = align_questions_with_vtt(oral_questions, vtt_str, councillors)
+            items_by_id = {}
+            for idx, item in enumerate(ai_items):
+                key = item.get("dossier_id") or item.get("id") or f"idx-{idx}"
+                if key:
+                    items_by_id[key] = item
+
+            items = []
+            for idx, original in enumerate(oral_questions):
+                key = original.get("dossier_id") or f"idx-{idx}"
+                item = items_by_id.get(key)
+                if not item:
+                    item = {
+                        **original,
+                        "question_start_time": "",
+                        "question_end_time": "",
+                        "answer_start_time": "",
+                        "answer_end_time": "",
+                        "question_text_raw": original.get("question_text_from_xml", ""),
+                        "answer_text_verbatim": "",
+                        "answer_text_raw": "",
+                        "summary": "",
+                        "actions": [],
+                        "topics": [],
+                        "answer_status": "draft",
+                        "note": "Automatisch toegevoegd: geen AI-resultaat beschikbaar.",
+                    }
+                items.append(item)
+            logger.info("OpenAI returned %d aligned items", len(items))
+
+            processing_completed_at = datetime.utcnow().isoformat()
+            for idx, q in enumerate(items):
+                key = q.get("dossier_id") or f"idx-{idx}"
+                question_id = question_db_ids.get(key)
+                if not question_id:
+                    logger.warning(
+                        "AI-result for key=%s has no placeholder row; skipping", key
+                    )
+                    continue
+                cur.execute(
+                    """
+                    UPDATE questions
+                    SET
+                        question_start_time = ?,
+                        question_end_time = ?,
+                        answer_start_time = ?,
+                        answer_end_time = ?,
+                        reply_start_time = COALESCE(reply_start_time, ''),
+                        reply_end_time = COALESCE(reply_end_time, ''),
+                        question_text_raw = ?,
+                        answer_text_verbatim = ?,
+                        answer_text_raw = ?,
+                        question_text_xml = ?,
+                        summary = ?,
+                        actions_json = ?,
+                        topics_json = ?,
+                        note = ?,
+                        answer_status = ?,
+                        processing_state = 'completed',
+                        processing_error = '',
+                        processing_started_at = COALESCE(processing_started_at, ?),
+                        processing_completed_at = ?,
+                        processing_attempts = processing_attempts + 1
+                    WHERE id = ?
+                    """,
+                    (
+                        q.get("question_start_time"),
+                        q.get("question_end_time"),
+                        q.get("answer_start_time"),
+                        q.get("answer_end_time"),
+                        q.get("question_text_raw"),
+                        q.get("answer_text_verbatim", q.get("answer_text_raw", "")),
+                        q.get("answer_text_raw"),
+                        question_lookup.get(
+                            q.get("dossier_id"),
+                            question_lookup.get(f"idx-{idx}", {}),
+                        ).get("question_text_from_xml", ""),
+                        q.get("summary"),
+                        json.dumps(q.get("actions", []), ensure_ascii=False),
+                        json.dumps(q.get("topics", []), ensure_ascii=False),
+                        q.get("note", ""),
+                        (q.get("answer_status") or "draft"),
+                        question_process_started,
+                        processing_completed_at,
+                        question_id,
+                    ),
+                )
+                processed_questions += 1
+    except Exception as exc:
+        processing_error = str(exc)[:1000]
+        logger.exception("Processing failed for meeting_id=%s", meeting_id)
+        cur.execute(
+            """
+            UPDATE questions
+            SET processing_state = 'error',
+                processing_error = ? || CASE WHEN processing_error IS NULL OR processing_error = '' THEN '' ELSE CHAR(10) || processing_error END
+            WHERE meeting_id = ? AND processing_state != 'completed'
+            """,
+            (processing_error, meeting_id),
+        )
+        conn.commit()
+        cur.execute(
+            """
+            UPDATE meetings
+            SET processing_state = 'error',
+                processed_questions = ?,
+                processing_error = ?
+            WHERE id = ?
+            """,
+            (processed_questions, processing_error, meeting_id),
+        )
+        conn.commit()
+        conn.close()
+        raise
+    else:
+        if oral_questions:
+            cur.execute(
+                """
+                UPDATE meetings
+                SET
+                    processed_questions = ?,
+                    processing_state = 'completed',
+                    processing_completed_at = ?,
+                    processing_error = ''
+                WHERE id = ?
+                """,
+                (processed_questions, processing_completed_at, meeting_id),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE meetings
+                SET
+                    processed_questions = 0,
+                    processing_state = 'completed',
+                    processing_completed_at = ?,
+                    processing_error = ''
+                WHERE id = ?
+                """,
+                (datetime.utcnow().isoformat(), meeting_id),
+            )
+        conn.commit()
+        conn.close()
+        logger.info(
+            "Upload finished meeting_id=%s questions=%d",
+            meeting_id,
+            len(oral_questions),
+        )
+
+    final_status = "completed" if processed_questions == len(oral_questions) else "processing"
+    return {
+        "status": final_status,
+        "meeting_id": meeting_id,
+        "questions": len(oral_questions),
+    }
 
 
 @app.get("/api/meetings/{meeting_id}")
@@ -400,6 +549,7 @@ async def create_question(payload: QuestionCreate):
                 max_seq = num
         sequence_nr = str(max_seq + 1)
 
+    now_ts = datetime.utcnow().isoformat()
     cur.execute(
         QUESTION_INSERT_SQL,
         (
@@ -431,6 +581,12 @@ async def create_question(payload: QuestionCreate):
             json.dumps([], ensure_ascii=False),
             "Handmatig toegevoegd via interface.",
             "draft",
+            "completed",
+            "",
+            now_ts,
+            now_ts,
+            0,
+            None,
         ),
     )
     question_id = cur.lastrowid
@@ -722,39 +878,48 @@ def restore_missing_questions(meeting_id: int):
     }
 
     added = 0
-    for q in oral_questions:
+    for idx, q in enumerate(oral_questions):
         key = question_key(q)
         if key in existing_ids:
             continue
 
         cur.execute(
-            """INSERT INTO questions (
-                meeting_id,
-                dossier_id, dossier_year_nr, sequence_nr,
-                title, subject, roi_type,
-                submitter_given_name, submitter_family_name, submitter_faction,
-                assignee_label, assignee_given_name, assignee_family_name,
-                question_start_time, question_end_time,
-                answer_start_time, answer_end_time,
-                reply_start_time, reply_end_time,
-                question_text_raw, answer_text_verbatim, answer_text_raw,
-                question_text_xml,
-                summary, actions_json, topics_json, note, answer_status
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            QUESTION_INSERT_SQL,
             (
                 meeting_id,
-                q.get("dossier_id"), q.get("dossier_year_nr"), q.get("sequence_nr"),
-                q.get("title"), q.get("subject"), q.get("roi_type"),
-                q.get("submitter_given_name"), q.get("submitter_family_name"), q.get("submitter_faction"),
-                q.get("assignee_label"), q.get("assignee_given_name"), q.get("assignee_family_name"),
-                "", "", "", "",
-                "", "",
-                q.get("question_text_from_xml", ""), "",
+                q.get("dossier_id"),
+                q.get("dossier_year_nr"),
+                q.get("sequence_nr"),
+                q.get("title"),
+                q.get("subject"),
+                q.get("roi_type"),
+                q.get("submitter_given_name"),
+                q.get("submitter_family_name"),
+                q.get("submitter_faction"),
+                q.get("assignee_label"),
+                q.get("assignee_given_name"),
+                q.get("assignee_family_name"),
+                "",
+                "",
+                "",
+                "",
+                "",
                 "",
                 q.get("question_text_from_xml", ""),
-                "", json.dumps([], ensure_ascii=False), json.dumps([], ensure_ascii=False),
+                "",
+                "",
+                q.get("question_text_from_xml", ""),
+                "",
+                json.dumps([], ensure_ascii=False),
+                json.dumps([], ensure_ascii=False),
                 "Automatisch toegevoegd vanuit bron-XML (geen AI-resultaat).",
                 "draft",
+                "pending",
+                "",
+                None,
+                None,
+                0,
+                idx,
             ),
         )
         added += 1

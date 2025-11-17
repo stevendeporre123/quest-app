@@ -199,6 +199,18 @@
       letter-spacing: 0.05em;
     }
 
+    .meeting-status-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+
+    .processing-note {
+      margin: 0.5rem 0;
+      font-size: 0.85rem;
+    }
+
     .time-cell {
       font-variant-numeric: tabular-nums;
       color: #475569;
@@ -240,6 +252,10 @@
           <p class="eyebrow" id="meeting-date"></p>
           <h1 class="page-title" id="meeting-title">Vergadering</h1>
           <p class="muted" id="meeting-meta"></p>
+          <div class="meeting-status-row">
+            <span class="status-pill" id="meetingStatusPill" data-state="pending">Onbekend</span>
+            <span class="muted" id="meeting-progress"></span>
+          </div>
         </div>
         <div class="card-actions">
           <a id="export-link" class="ghost-btn" href="#">Download Word</a>
@@ -271,6 +287,7 @@
               <th>Schepen</th>
               <th>Vraag</th>
               <th>Antwoord</th>
+              <th>Status</th>
               <th>Acties</th>
             </tr>
           </thead>
@@ -360,6 +377,8 @@
   <script>
     const pathParts = window.location.pathname.split('/');
     const meetingId = pathParts[pathParts.length - 1];
+    const meetingStatusPill = document.getElementById('meetingStatusPill');
+    const meetingProgress = document.getElementById('meeting-progress');
 
     const deleteMeetingBtn = document.getElementById('deleteMeetingBtn');
     const restoreBtn = document.getElementById('restoreMissingBtn');
@@ -435,6 +454,28 @@
       };
 
     const DASH = '\u2013';
+    const PROCESS_STATE_LABELS = {
+      completed: 'Klaar',
+      processing: 'Bezig',
+      pending: 'Wacht',
+      error: 'Fout'
+    };
+
+    function formatMeetingProcessing(meeting) {
+      const state = (meeting.processing_state || '').toLowerCase() || 'pending';
+      const totalQuestions = Number(meeting.total_questions ?? 0) || 0;
+      const processed = Number(meeting.processed_questions ?? 0) || 0;
+      const label = PROCESS_STATE_LABELS[state] || 'Onbekend';
+      const progress = totalQuestions ? `${Math.min(processed, totalQuestions)}/${totalQuestions}` : `${processed}`;
+      return { state, label, progress };
+    }
+
+    function formatQuestionProcessing(question) {
+      const state = (question.processing_state || '').toLowerCase() || 'pending';
+      const label = PROCESS_STATE_LABELS[state] || 'Onbekend';
+      const error = question.processing_error || '';
+      return { state, label, error };
+    }
 
     const formatTimecode = (value) => {
       if (value === undefined || value === null || value === '') return DASH;
@@ -583,14 +624,28 @@
         return;
       }
 
-        const data = await res.json();
-        currentQuestions = data.questions || [];
-        const m = data.meeting;
+      const data = await res.json();
+      currentQuestions = data.questions || [];
+      const m = data.meeting;
       document.getElementById('meeting-date').textContent = m.meeting_date || '';
       document.getElementById('meeting-title').textContent =
         `${m.commission_name || 'Vergadering'} - ${m.meeting_date || ''}`;
       document.getElementById('meeting-meta').textContent =
         m.webcast_id ? `Webcast ID: ${m.webcast_id}` : 'Geen webcast-id ingesteld.';
+      const meetingStatus = formatMeetingProcessing(m);
+      if (meetingStatusPill) {
+        meetingStatusPill.dataset.state = meetingStatus.state;
+        meetingStatusPill.textContent = meetingStatus.label;
+      }
+      if (meetingProgress) {
+        if (meetingStatus.state === 'error' && m.processing_error) {
+          meetingProgress.textContent = m.processing_error;
+        } else if ((Number(m.total_questions ?? 0) || 0) > 0) {
+          meetingProgress.textContent = `${meetingStatus.progress} vragen`;
+        } else {
+          meetingProgress.textContent = '';
+        }
+      }
 
       if (m.webcast_id) {
         document.getElementById('webcast-container').innerHTML = `
@@ -619,7 +674,7 @@
           q.submitter_family_name,
           q.submitter_faction
         );
-          const assigneeInfo = buildPersonInfo(
+        const assigneeInfo = buildPersonInfo(
             q.assignee_given_name,
             q.assignee_family_name,
             q.assignee_label,
@@ -627,6 +682,7 @@
           );
           const questionRangeDisplay = formatTimeRange(q.question_start_time, q.question_end_time);
           const answerRangeDisplay = formatTimeRange(q.answer_start_time, q.answer_end_time);
+        const processingInfo = formatQuestionProcessing(q);
 
           tr.innerHTML = `
           <td>${htmlEscape(q.sequence_nr || '')}</td>
@@ -643,6 +699,11 @@
           </td>
             <td class="time-cell">${questionRangeDisplay}</td>
             <td class="time-cell">${answerRangeDisplay}</td>
+            <td>
+              <span class="status-pill" data-state="${processingInfo.state}">
+                ${processingInfo.label}
+              </span>
+            </td>
             <td class="table-actions">
               <button type="button" class="icon-btn" data-action="view" title="Bekijk vraag">
                 <i data-feather="eye" aria-hidden="true"></i>
@@ -699,6 +760,9 @@
         const questionRange = formatTimeRange(q.question_start_time, q.question_end_time);
         const answerRange = formatTimeRange(q.answer_start_time, q.answer_end_time);
         const chips = '';
+        const processingNote = processingInfo.error
+          ? `<p class="muted processing-note">Fout: ${htmlEscape(processingInfo.error)}</p>`
+          : '';
 
         const detail = document.createElement('article');
         detail.className = 'question-card';
@@ -722,8 +786,10 @@
             <div><span>Vraag</span>${questionRange}</div>
             <div><span>Antwoord</span>${answerRange}</div>
             <div><span>Status</span><span class="status-pill status-${answerStatus}">${answerStatusLabel}</span></div>
+            <div><span>Verwerking</span><span class="status-pill" data-state="${processingInfo.state}">${processingInfo.label}</span></div>
           </div>
           ${chips}
+          ${processingNote}
           <h4>Vraag</h4>
           <p>${questionText || '<span class="muted">' + DASH + '</span>'}</p>
           <h4>Antwoord (quasi letterlijke versie)</h4>

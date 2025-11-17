@@ -33,7 +33,13 @@ def init_db():
             source_questions_json TEXT,
             transcript_text TEXT,
             agenda_file_path TEXT,
-            transcript_file_path TEXT
+            transcript_file_path TEXT,
+            processing_state TEXT DEFAULT 'pending',
+            processing_started_at TEXT,
+            processing_completed_at TEXT,
+            processing_error TEXT,
+            total_questions INTEGER DEFAULT 0,
+            processed_questions INTEGER DEFAULT 0
         )"""
     )
 
@@ -75,6 +81,12 @@ def init_db():
             topics_json TEXT,
             note TEXT,
             answer_status TEXT DEFAULT 'draft',
+            processing_state TEXT DEFAULT 'pending',
+            processing_started_at TEXT,
+            processing_completed_at TEXT,
+            processing_error TEXT,
+            processing_attempts INTEGER DEFAULT 0,
+            source_question_idx INTEGER,
 
             FOREIGN KEY (meeting_id) REFERENCES meetings(id)
         )"""
@@ -101,6 +113,19 @@ def init_db():
     _ensure_column(conn, "meetings", "transcript_text", "TEXT")
     _ensure_column(conn, "meetings", "agenda_file_path", "TEXT")
     _ensure_column(conn, "meetings", "transcript_file_path", "TEXT")
+    _ensure_column(conn, "meetings", "processing_state", "TEXT DEFAULT 'pending'")
+    _ensure_column(conn, "meetings", "processing_started_at", "TEXT")
+    _ensure_column(conn, "meetings", "processing_completed_at", "TEXT")
+    _ensure_column(conn, "meetings", "processing_error", "TEXT")
+    _ensure_column(conn, "meetings", "total_questions", "INTEGER DEFAULT 0")
+    _ensure_column(conn, "meetings", "processed_questions", "INTEGER DEFAULT 0")
+
+    _ensure_column(conn, "questions", "processing_state", "TEXT DEFAULT 'pending'")
+    _ensure_column(conn, "questions", "processing_started_at", "TEXT")
+    _ensure_column(conn, "questions", "processing_completed_at", "TEXT")
+    _ensure_column(conn, "questions", "processing_error", "TEXT")
+    _ensure_column(conn, "questions", "processing_attempts", "INTEGER DEFAULT 0")
+    _ensure_column(conn, "questions", "source_question_idx", "INTEGER")
 
     conn.commit()
     conn.close()
