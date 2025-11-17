@@ -108,6 +108,24 @@ def init_db():
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_councillors_given_family ON councillors(given_name, family_name)"
     )
 
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS question_followups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            question_id INTEGER NOT NULL,
+            speaker_given_name TEXT,
+            speaker_family_name TEXT,
+            speaker_faction TEXT,
+            type TEXT,
+            note TEXT,
+            text TEXT,
+            start_time TEXT,
+            end_time TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT,
+            FOREIGN KEY (question_id) REFERENCES questions(id)
+        )"""
+    )
+
     _ensure_column(conn, "questions", "question_text_xml", "TEXT")
     _ensure_column(conn, "questions", "answer_text_verbatim", "TEXT")
     _ensure_column(conn, "questions", "answer_status", "TEXT DEFAULT 'draft'")

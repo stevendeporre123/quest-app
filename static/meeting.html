@@ -252,6 +252,54 @@
       margin: 0.5rem 0;
     }
 
+    .followups {
+      margin-top: 1rem;
+    }
+
+    .followup-list {
+      list-style: none;
+      padding: 0;
+      margin: 0.5rem 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .followup-item {
+      border: 1px solid #e2e8f0;
+      border-radius: 0.5rem;
+      padding: 0.5rem 0.75rem;
+    }
+
+    .followup-meta {
+      font-size: 0.85rem;
+      color: #475569;
+      margin-bottom: 0.35rem;
+    }
+
+    .followup-actions {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    .followup-form {
+      margin-top: 0.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+    }
+
+    .followup-form .form-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+
+    .followup-form textarea {
+      min-height: 80px;
+    }
+
     .time-cell {
       font-variant-numeric: tabular-nums;
       color: #475569;
@@ -458,6 +506,7 @@
     });
 
     let currentQuestions = [];
+    let followupCache = {};
 
     const addQuestionBtn = document.getElementById('addQuestionBtn');
     const questionModal = document.getElementById('questionModal');
@@ -567,6 +616,26 @@
       const subject = question.subject || question.title || '';
       const base = `vraag ${seq}`;
       return subject ? `${base} – ${subject}` : base;
+    }
+
+    function renderFollowupItem(item) {
+      const speaker = formatName(item.speaker_given_name, item.speaker_family_name) || 'Onbekend';
+      const faction = item.speaker_faction ? ` (${item.speaker_faction})` : '';
+      const type = item.type || 'followup';
+      const timeDisplay = formatTimeRange(item.start_time, item.end_time);
+      const textHtml = (item.text || '').replace(/\n/g, '<br>');
+      return `
+        <li class="followup-item" data-followup-id="${item.id}">
+          <div class="followup-meta">
+            <strong>${htmlEscape(speaker)}</strong>${htmlEscape(faction)} – ${htmlEscape(type)} – ${timeDisplay}
+          </div>
+          <p>${textHtml || '<span class="muted">Geen tekst</span>'}</p>
+          <div class="followup-actions">
+            <button type="button" class="ghost-btn followup-edit" data-id="${item.id}" data-question="${item.question_id}">Bewerk</button>
+            <button type="button" class="danger-btn followup-delete" data-id="${item.id}">Verwijder</button>
+          </div>
+        </li>
+      `;
     }
 
     const formatName = (given, family) => {
@@ -692,6 +761,7 @@
       currentQuestions.forEach(item => {
         questionLookup[item.id] = item;
       });
+      followupCache = {};
       const m = data.meeting;
       document.getElementById('meeting-date').textContent = m.meeting_date || '';
       document.getElementById('meeting-title').textContent =
@@ -832,6 +902,13 @@
           ? `<p class="muted processing-note">Fout: ${htmlEscape(processingInfo.error)}</p>`
           : '';
         const followers = currentQuestions.filter(item => item.group_root_question_id === q.id);
+        const followups = Array.isArray(q.followups) ? q.followups : [];
+        followups.forEach(f => {
+          followupCache[f.id] = f;
+        });
+        const followupItems = followups.length
+          ? followups.map(renderFollowupItem).join('')
+          : '<li class="muted">Nog geen aansluitingen.</li>';
         let groupNote = '';
         if (groupTarget) {
           const targetLabel = htmlEscape(formatGroupTargetLabel(groupTarget));
@@ -888,6 +965,32 @@
               <input type="text" class="group-label-input" data-id="${q.id}" placeholder="vb. Zie antwoord bij vraag 12" value="${groupLabelValue}">
               <button type="button" class="ghost-btn group-save" data-id="${q.id}">Bewaar</button>
             </div>
+          </div>
+          <div class="followups" data-question="${q.id}">
+            <h4>Aansluitingen & extra vragen</h4>
+            <ul class="followup-list">${followupItems}</ul>
+            <form class="followup-form" data-question="${q.id}">
+              <input type="hidden" name="followup_id">
+              <div class="form-row">
+                <input type="text" name="speaker_given_name" placeholder="Voornaam">
+                <input type="text" name="speaker_family_name" placeholder="Achternaam">
+                <input type="text" name="speaker_faction" placeholder="Fractie">
+              </div>
+              <div class="form-row">
+                <input type="text" name="start_time" placeholder="Starttijd">
+                <input type="text" name="end_time" placeholder="Eindtijd">
+                <select name="type">
+                  <option value="followup">Aansluiting</option>
+                  <option value="question">Extra vraag</option>
+                  <option value="remark">Opmerking</option>
+                </select>
+              </div>
+              <textarea name="text" placeholder="Samenvatting van de interventie"></textarea>
+              <div class="form-row">
+                <button type="submit" class="primary-btn">Toevoegen</button>
+                <button type="button" class="ghost-btn followup-reset" data-question="${q.id}">Reset</button>
+              </div>
+            </form>
           </div>
           <h4>Vraag</h4>
           <p>${questionText || '<span class="muted">' + DASH + '</span>'}</p>
@@ -1122,6 +1225,106 @@
         questionModalSubmit.disabled = false;
         questionModalSubmit.textContent = modalMode === 'create' ? submitLabelCreate : submitLabelEdit;
       }
+    });
+
+    document.addEventListener('submit', async (event) => {
+      const form = event.target.closest('.followup-form');
+      if (!form) return;
+      event.preventDefault();
+      const questionId = Number(form.dataset.question);
+      const formData = new FormData(form);
+      const followupId = formData.get('followup_id');
+      const payload = {};
+      formData.forEach((value, key) => {
+        if (key === 'followup_id') return;
+        payload[key] = value.trim();
+      });
+      const submitBtn = form.querySelector('button[type="submit"]');
+      const originalText = submitBtn?.textContent;
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = followupId ? 'Opslaan...' : 'Toevoegen...';
+      }
+      try {
+        const url = followupId
+          ? `/api/followups/${followupId}`
+          : `/api/questions/${questionId}/followups`;
+        const method = followupId ? 'PATCH' : 'POST';
+        const res = await fetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'Opslaan mislukt.');
+        }
+        form.reset();
+        const hidden = form.querySelector('input[name="followup_id"]');
+        if (hidden) hidden.value = '';
+        await loadMeeting();
+      } catch (err) {
+        alert(err.message || 'Opslaan mislukt.');
+      } finally {
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.textContent = originalText;
+        }
+      }
+    });
+
+    document.addEventListener('click', async (event) => {
+      const btn = event.target.closest('.followup-delete');
+      if (!btn) return;
+      const followupId = btn.dataset.id;
+      if (!followupId) return;
+      if (!confirm('Deze aansluiting verwijderen?')) return;
+      btn.disabled = true;
+      const originalText = btn.textContent;
+      btn.textContent = 'Verwijderen...';
+      try {
+        const res = await fetch(`/api/followups/${followupId}`, { method: 'DELETE' });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'Verwijderen mislukt.');
+        }
+        await loadMeeting();
+      } catch (err) {
+        alert(err.message || 'Verwijderen mislukt.');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
+    });
+
+    document.addEventListener('click', (event) => {
+      const btn = event.target.closest('.followup-edit');
+      if (!btn) return;
+      const followupId = Number(btn.dataset.id);
+      const questionId = btn.dataset.question;
+      const followup = followupCache[followupId];
+      if (!followup) return;
+      const form = document.querySelector(`.followup-form[data-question="${questionId}"]`);
+      if (!form) return;
+      form.querySelector('input[name="followup_id"]').value = followupId;
+      form.querySelector('input[name="speaker_given_name"]').value = followup.speaker_given_name || '';
+      form.querySelector('input[name="speaker_family_name"]').value = followup.speaker_family_name || '';
+      form.querySelector('input[name="speaker_faction"]').value = followup.speaker_faction || '';
+      form.querySelector('input[name="start_time"]').value = followup.start_time || '';
+      form.querySelector('input[name="end_time"]').value = followup.end_time || '';
+      form.querySelector('select[name="type"]').value = followup.type || 'followup';
+      form.querySelector('textarea[name="text"]').value = followup.text || '';
+      form.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+
+    document.addEventListener('click', (event) => {
+      const btn = event.target.closest('.followup-reset');
+      if (!btn) return;
+      const form = btn.closest('.followup-form');
+      if (!form) return;
+      form.reset();
+      const hidden = form.querySelector('input[name="followup_id"]');
+      if (hidden) hidden.value = '';
     });
   </script>
 </body>

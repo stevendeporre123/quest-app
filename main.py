@@ -742,7 +742,30 @@ def get_meeting(meeting_id: int):
         """,
         (meeting_id,),
     )
-    questions = [_deserialize_question_row(row) for row in cur.fetchall()]
+    question_rows = cur.fetchall()
+    question_ids = [row["id"] for row in question_rows]
+    followups_map = {}
+    if question_ids:
+        placeholders = ",".join(["?"] * len(question_ids))
+        cur.execute(
+            f"""
+            SELECT *
+            FROM question_followups
+            WHERE question_id IN ({placeholders})
+            ORDER BY
+                CASE WHEN start_time IS NULL OR start_time = '' THEN 1 ELSE 0 END,
+                start_time,
+                id
+            """,
+            question_ids,
+        )
+        for row in cur.fetchall():
+            followups_map.setdefault(row["question_id"], []).append(dict(row))
+    questions = []
+    for row in question_rows:
+        item = _deserialize_question_row(row)
+        item["followups"] = followups_map.get(row["id"], [])
+        questions.append(item)
     conn.close()
 
     return {"meeting": dict(meeting), "questions": questions}
@@ -792,6 +815,28 @@ class QuestionUpdate(BaseModel):
 class QuestionGroupUpdate(BaseModel):
     group_root_question_id: Optional[int] = None
     group_label: Optional[str] = None
+
+
+class FollowupCreate(BaseModel):
+    speaker_given_name: Optional[str] = ""
+    speaker_family_name: Optional[str] = ""
+    speaker_faction: Optional[str] = ""
+    type: Optional[str] = "followup"
+    note: Optional[str] = ""
+    text: Optional[str] = ""
+    start_time: Optional[str] = ""
+    end_time: Optional[str] = ""
+
+
+class FollowupUpdate(BaseModel):
+    speaker_given_name: Optional[str] = None
+    speaker_family_name: Optional[str] = None
+    speaker_faction: Optional[str] = None
+    type: Optional[str] = None
+    note: Optional[str] = None
+    text: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
 
 
 @app.post("/api/questions", status_code=201)
@@ -991,6 +1036,98 @@ def update_question_grouping(question_id: int, payload: QuestionGroupUpdate):
     _update_meeting_processing_summary(meeting_id)
     _enqueue_question_processing(question_id)
     return {"status": "queued", "question": _deserialize_question_row(updated)}
+
+
+@app.post("/api/questions/{question_id}/followups", status_code=201)
+def create_followup(question_id: int, payload: FollowupCreate):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM questions WHERE id = ?", (question_id,))
+    question = cur.fetchone()
+    if not question:
+        conn.close()
+        return JSONResponse({"error": "question not found"}, status_code=404)
+
+    cur.execute(
+        """
+        INSERT INTO question_followups (
+            question_id,
+            speaker_given_name,
+            speaker_family_name,
+            speaker_faction,
+            type,
+            note,
+            text,
+            start_time,
+            end_time,
+            updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            question_id,
+            (payload.speaker_given_name or "").strip(),
+            (payload.speaker_family_name or "").strip(),
+            (payload.speaker_faction or "").strip(),
+            (payload.type or "followup").strip() or "followup",
+            (payload.note or "").strip(),
+            (payload.text or "").strip(),
+            (payload.start_time or "").strip(),
+            (payload.end_time or "").strip(),
+            _now_iso(),
+        ),
+    )
+    followup_id = cur.lastrowid
+    conn.commit()
+    cur.execute("SELECT * FROM question_followups WHERE id = ?", (followup_id,))
+    followup = dict(cur.fetchone())
+    conn.close()
+    return {"status": "created", "followup": followup}
+
+
+@app.patch("/api/followups/{followup_id}")
+def update_followup(followup_id: int, payload: FollowupUpdate):
+    data = payload.model_dump(exclude_unset=True)
+    if not data:
+        return {"status": "no changes"}
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM question_followups WHERE id = ?", (followup_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return JSONResponse({"error": "followup not found"}, status_code=404)
+    fields = []
+    values = []
+    for key, value in data.items():
+        fields.append(f"{key} = ?")
+        values.append((value or "").strip())
+    fields.append("updated_at = ?")
+    values.append(_now_iso())
+    values.append(followup_id)
+    cur.execute(
+        f"UPDATE question_followups SET {', '.join(fields)} WHERE id = ?",
+        values,
+    )
+    conn.commit()
+    cur.execute("SELECT * FROM question_followups WHERE id = ?", (followup_id,))
+    updated = dict(cur.fetchone())
+    conn.close()
+    return {"status": "ok", "followup": updated}
+
+
+@app.delete("/api/followups/{followup_id}")
+def delete_followup(followup_id: int):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM question_followups WHERE id = ?", (followup_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return JSONResponse({"error": "followup not found"}, status_code=404)
+    cur.execute("DELETE FROM question_followups WHERE id = ?", (followup_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "deleted", "followup_id": followup_id}
 
 
 @app.post("/api/questions/{question_id}/regenerate")
