@@ -282,6 +282,30 @@ class QuestionProcessingQueue:
         if not meeting:
             conn.close()
             return
+        group_root_id = question["group_root_question_id"]
+        root_question = None
+        if group_root_id:
+            cur.execute("SELECT * FROM questions WHERE id = ?", (group_root_id,))
+            root_question = cur.fetchone()
+            if not root_question or root_question["meeting_id"] != meeting["id"]:
+                cur.execute(
+                    "UPDATE questions SET group_root_question_id = NULL WHERE id = ?",
+                    (question_id,),
+                )
+                conn.commit()
+                group_root_id = None
+                root_question = None
+            else:
+                root_state = (root_question["processing_state"] or "").lower()
+                if root_state != "completed":
+                    cur.execute(
+                        "UPDATE questions SET processing_state = 'queued' WHERE id = ?",
+                        (question_id,),
+                    )
+                    conn.commit()
+                    conn.close()
+                    self._queue.put(question_id)
+                    return
         start_ts = _now_iso()
         cur.execute(
             """
@@ -306,6 +330,7 @@ class QuestionProcessingQueue:
         councillors = list_councillors(conn)
         meeting_data = dict(meeting)
         question_data = dict(question)
+        root_data = dict(root_question) if root_question else None
         transcript_text = meeting_data.get("transcript_text") or ""
         conn.close()
 
@@ -325,6 +350,19 @@ class QuestionProcessingQueue:
             return
 
         item = ai_items[0]
+        if question_data.get("group_root_question_id") and root_data:
+            target_label = root_data.get("sequence_nr") or root_data.get("subject") or root_data.get("title") or f"#{root_data.get('id')}"
+            reference_text = (question_data.get("group_label") or "").strip()
+            if not reference_text:
+                reference_text = f"Het antwoord werd gegeven bij vraag {target_label}."
+            if not reference_text.endswith("."):
+                reference_text += "."
+            item["answer_text_raw"] = reference_text
+            item["answer_text_verbatim"] = reference_text
+            item["summary"] = reference_text
+            extra_note = f"Gekoppeld aan vraag {target_label}."
+            existing_note = (item.get("note") or "").strip()
+            item["note"] = f"{existing_note} {extra_note}".strip()
         item.setdefault("answer_text_verbatim", item.get("answer_text_raw", ""))
         item.setdefault("answer_text_raw", "")
         item.setdefault("answer_status", "draft")
@@ -466,6 +504,8 @@ QUESTION_INSERT_COLUMNS = [
     "processing_completed_at",
     "processing_attempts",
     "source_question_idx",
+    "group_root_question_id",
+    "group_label",
 ]
 
 QUESTION_INSERT_SQL = (
@@ -655,6 +695,8 @@ async def upload(
                 None,
                 0,
                 idx,
+                None,
+                "",
             ),
         )
         logger.info(
@@ -747,6 +789,11 @@ class QuestionUpdate(BaseModel):
     topics: Optional[List[str]] = None
 
 
+class QuestionGroupUpdate(BaseModel):
+    group_root_question_id: Optional[int] = None
+    group_label: Optional[str] = None
+
+
 @app.post("/api/questions", status_code=201)
 async def create_question(payload: QuestionCreate):
     conn = get_db()
@@ -809,6 +856,8 @@ async def create_question(payload: QuestionCreate):
             now_ts,
             0,
             None,
+            None,
+            "",
         ),
     )
     question_id = cur.lastrowid
@@ -895,6 +944,55 @@ def delete_question(question_id: int):
     return {"status": "deleted", "question_id": question_id}
 
 
+@app.post("/api/questions/{question_id}/group")
+def update_question_grouping(question_id: int, payload: QuestionGroupUpdate):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT meeting_id FROM questions WHERE id = ?", (question_id,))
+    question = cur.fetchone()
+    if not question:
+        conn.close()
+        return JSONResponse({"error": "question not found"}, status_code=404)
+
+    root_id = payload.group_root_question_id
+    label = (payload.group_label or "").strip()
+    meeting_id = question["meeting_id"]
+
+    if root_id:
+        if root_id == question_id:
+            conn.close()
+            return JSONResponse({"error": "Een vraag kan niet naar zichzelf verwijzen."}, status_code=400)
+        cur.execute(
+            "SELECT id FROM questions WHERE id = ? AND meeting_id = ?",
+            (root_id, meeting_id),
+        )
+        root_question = cur.fetchone()
+        if not root_question:
+            conn.close()
+            return JSONResponse({"error": "Doelvraag bestaat niet binnen dezelfde vergadering."}, status_code=400)
+    cur.execute(
+        """
+        UPDATE questions
+        SET
+            group_root_question_id = ?,
+            group_label = ?,
+            processing_state = 'pending',
+            processing_started_at = NULL,
+            processing_completed_at = NULL,
+            processing_error = ''
+        WHERE id = ?
+        """,
+        (root_id, label, question_id),
+    )
+    conn.commit()
+    cur.execute("SELECT * FROM questions WHERE id = ?", (question_id,))
+    updated = cur.fetchone()
+    conn.close()
+    _update_meeting_processing_summary(meeting_id)
+    _enqueue_question_processing(question_id)
+    return {"status": "queued", "question": _deserialize_question_row(updated)}
+
+
 @app.post("/api/questions/{question_id}/regenerate")
 async def regenerate_question(question_id: int):
     conn = get_db()
@@ -978,6 +1076,9 @@ def export_docx(meeting_id: int):
         doc.add_paragraph(f"Bevoegde schepen: {q['assignee_label']}")
         doc.add_paragraph("\nVraag:")
         doc.add_paragraph(q['question_text_raw'] or "")
+        if q["group_root_question_id"]:
+            ref = q["group_label"] or f"Zie antwoord bij vraag {q['group_root_question_id']}."
+            doc.add_paragraph(f"Koppeling: {ref}")
         doc.add_paragraph("\nAntwoord (quasi letterlijke versie):")
         doc.add_paragraph(q['answer_text_verbatim'] or "")
         doc.add_paragraph("\nAntwoord (gebalde versie):")
@@ -1076,6 +1177,8 @@ def restore_missing_questions(meeting_id: int):
                 None,
                 0,
                 idx,
+                None,
+                "",
             ),
         )
         added += 1

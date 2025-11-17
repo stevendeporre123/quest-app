@@ -87,6 +87,8 @@ def init_db():
             processing_error TEXT,
             processing_attempts INTEGER DEFAULT 0,
             source_question_idx INTEGER,
+            group_root_question_id INTEGER,
+            group_label TEXT,
 
             FOREIGN KEY (meeting_id) REFERENCES meetings(id)
         )"""
@@ -126,6 +128,8 @@ def init_db():
     _ensure_column(conn, "questions", "processing_error", "TEXT")
     _ensure_column(conn, "questions", "processing_attempts", "INTEGER DEFAULT 0")
     _ensure_column(conn, "questions", "source_question_idx", "INTEGER")
+    _ensure_column(conn, "questions", "group_root_question_id", "INTEGER")
+    _ensure_column(conn, "questions", "group_label", "TEXT")
 
     conn.commit()
     conn.close()

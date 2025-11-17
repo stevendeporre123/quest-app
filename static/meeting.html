@@ -211,6 +211,47 @@
       font-size: 0.85rem;
     }
 
+    .group-badge {
+      display: inline-block;
+      background: #fef3c7;
+      color: #92400e;
+      padding: 0 0.45rem;
+      font-size: 0.75rem;
+      border-radius: 999px;
+      margin-left: 0.35rem;
+    }
+
+    .grouping-panel {
+      margin-top: 1rem;
+      padding: 0.75rem;
+      border: 1px dashed #cbd5f5;
+      border-radius: 0.5rem;
+      background: #f8fafc;
+    }
+
+    .grouping-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      align-items: center;
+      margin-top: 0.35rem;
+    }
+
+    .grouping-row select {
+      min-width: 180px;
+    }
+
+    .grouping-row input {
+      flex: 1;
+      min-width: 200px;
+    }
+
+    .group-note {
+      font-style: italic;
+      color: #475569;
+      margin: 0.5rem 0;
+    }
+
     .time-cell {
       font-variant-numeric: tabular-nums;
       color: #475569;
@@ -520,6 +561,14 @@
       return `${from} ${DASH} ${to}`;
     };
 
+    function formatGroupTargetLabel(question) {
+      if (!question) return '';
+      const seq = question.sequence_nr || question.id;
+      const subject = question.subject || question.title || '';
+      const base = `vraag ${seq}`;
+      return subject ? `${base} – ${subject}` : base;
+    }
+
     const formatName = (given, family) => {
       const name = [given, family].map(part => (part || '').trim()).filter(Boolean).join(' ');
       return name.trim();
@@ -639,6 +688,10 @@
 
       const data = await res.json();
       currentQuestions = data.questions || [];
+      const questionLookup = {};
+      currentQuestions.forEach(item => {
+        questionLookup[item.id] = item;
+      });
       const m = data.meeting;
       document.getElementById('meeting-date').textContent = m.meeting_date || '';
       document.getElementById('meeting-title').textContent =
@@ -696,10 +749,12 @@
           const questionRangeDisplay = formatTimeRange(q.question_start_time, q.question_end_time);
           const answerRangeDisplay = formatTimeRange(q.answer_start_time, q.answer_end_time);
         const processingInfo = formatQuestionProcessing(q);
+        const groupTarget = q.group_root_question_id ? questionLookup[q.group_root_question_id] : null;
+        const groupBadge = groupTarget ? `<span class="group-badge">&rarr; ${htmlEscape(formatGroupTargetLabel(groupTarget))}</span>` : '';
 
           tr.innerHTML = `
           <td>${htmlEscape(q.sequence_nr || '')}</td>
-          <td>${htmlEscape(q.subject || '')}</td>
+          <td>${htmlEscape(q.subject || '')} ${groupBadge}</td>
           <td>
             <div class="person-cell">
               ${buildPersonLink(submitterInfo, 'submitter')}
@@ -776,6 +831,25 @@
         const processingNote = processingInfo.error
           ? `<p class="muted processing-note">Fout: ${htmlEscape(processingInfo.error)}</p>`
           : '';
+        const followers = currentQuestions.filter(item => item.group_root_question_id === q.id);
+        let groupNote = '';
+        if (groupTarget) {
+          const targetLabel = htmlEscape(formatGroupTargetLabel(groupTarget));
+          const labelText = q.group_label ? htmlEscape(q.group_label) : `Zie ${targetLabel}.`;
+          groupNote = `<p class="group-note">Verwijst naar ${targetLabel}. ${labelText}</p>`;
+        } else if (followers.length) {
+          const plural = followers.length > 1 ? 'en' : '';
+          groupNote = `<p class="group-note">Hoofdvraag voor ${followers.length} gekoppelde vraag${plural}.</p>`;
+        }
+        const groupLabelValue = htmlEscape(q.group_label || '');
+        const groupOptions = currentQuestions
+          .filter(item => item.id !== q.id)
+          .map(item => {
+            const selected = item.id === q.group_root_question_id ? 'selected' : '';
+            const label = htmlEscape(formatGroupTargetLabel(item) || `vraag ${item.id}`);
+            return `<option value="${item.id}" ${selected}>${label}</option>`;
+          })
+          .join('');
 
         const detail = document.createElement('article');
         detail.className = 'question-card';
@@ -803,6 +877,18 @@
           </div>
           ${chips}
           ${processingNote}
+          ${groupNote}
+          <div class="grouping-panel">
+            <label>Vraaggroep</label>
+            <div class="grouping-row" data-question="${q.id}">
+              <select class="group-select" data-id="${q.id}">
+                <option value="">Zelfstandig antwoord</option>
+                ${groupOptions || '<option value="" disabled>Geen andere vragen beschikbaar</option>'}
+              </select>
+              <input type="text" class="group-label-input" data-id="${q.id}" placeholder="vb. Zie antwoord bij vraag 12" value="${groupLabelValue}">
+              <button type="button" class="ghost-btn group-save" data-id="${q.id}">Bewaar</button>
+            </div>
+          </div>
           <h4>Vraag</h4>
           <p>${questionText || '<span class="muted">' + DASH + '</span>'}</p>
           <h4>Antwoord (quasi letterlijke versie)</h4>
@@ -937,6 +1023,40 @@
         if (question) {
           openQuestionModal('edit', question);
         }
+      }
+    });
+
+    document.addEventListener('click', async (e) => {
+      const btn = e.target.closest('.group-save');
+      if (!btn) return;
+      const row = btn.closest('.grouping-row');
+      if (!row) return;
+      const selectEl = row.querySelector('.group-select');
+      const labelEl = row.querySelector('.group-label-input');
+      const questionId = Number(btn.dataset.id);
+      const payload = {
+        group_root_question_id: selectEl?.value ? Number(selectEl.value) : null,
+        group_label: labelEl?.value?.trim() || ''
+      };
+      btn.disabled = true;
+      const originalText = btn.textContent;
+      btn.textContent = 'Opslaan...';
+      try {
+        const res = await fetch(`/api/questions/${questionId}/group`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'Opslaan mislukt.');
+        }
+        await loadMeeting();
+      } catch (err) {
+        alert(err.message || 'Opslaan mislukt.');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
       }
     });
 
