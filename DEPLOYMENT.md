@@ -6,7 +6,9 @@ This document describes how to build and run Quest inside Docker and how to publ
 
 - Docker Engine and Docker Compose v2 on the EC2 host.
 - Existing Traefik container that exposes the external network named `traefik` (create it once using `docker network create traefik`).
-- `.env` file in the project root that contains the same secrets the app uses locally (OpenAI keys, etc.).
+- Access to the secrets the app needs (OpenAI keys, etc.). You can either keep
+  them in a local `.env` file when running `docker compose` yourself or inject
+  them through your orchestrator (Portainer, ECS, ...).
 
 ## 2. Build the image
 
@@ -39,7 +41,17 @@ Traefik will automatically route HTTPS traffic to the Quest container and handle
 
 ## 5. Environment variables
 
-All environment variables from `.env` are passed to the container. Add any extra values to `.env` (for example `OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, etc.). The `QUEST_DB_PATH` variable is set inside `docker-compose.yml`; change it if you prefer a different mount point.
+The container only needs an `OPENAI_API_KEY` besides the `QUEST_*` paths defined
+in `docker-compose.yml`. Supply it via whatever mechanism fits your deployment:
+
+- When running `docker compose` directly, add it to a local `.env` file so
+  Compose can interpolate `${OPENAI_API_KEY}` inside the service definition.
+- When running the stack inside Portainer (or another orchestrator), configure
+  `OPENAI_API_KEY` in the environment variable editor. The compose file already
+  exposes it through the `environment` section, so no `.env` file is required.
+
+Add any future secrets to the compose file in the same fashion so they can be
+overridden either by `.env` or by the orchestration layer.
 
 ## 6. Updating
 
