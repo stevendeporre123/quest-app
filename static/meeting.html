@@ -427,6 +427,7 @@
 
     let modalMode = 'create';
     let activeQuestionId = null;
+    let refreshTimer = null;
 
     const htmlEscape = (value) => {
       if (value === null || value === undefined) return '';
@@ -453,11 +454,22 @@
         }
       };
 
+    function scheduleMeetingRefresh(shouldRefresh) {
+      if (refreshTimer) {
+        clearTimeout(refreshTimer);
+        refreshTimer = null;
+      }
+      if (shouldRefresh) {
+        refreshTimer = setTimeout(() => loadMeeting({ silent: true }), 10000);
+      }
+    }
+
     const DASH = '\u2013';
     const PROCESS_STATE_LABELS = {
       completed: 'Klaar',
       processing: 'Bezig',
       pending: 'Wacht',
+      queued: 'Wacht',
       error: 'Fout'
     };
 
@@ -617,7 +629,8 @@
 
     addQuestionBtn?.addEventListener('click', () => openQuestionModal('create'));
 
-    async function loadMeeting() {
+    async function loadMeeting(options = {}) {
+      const { silent = false } = options;
       const res = await fetch(`/api/meetings/${meetingId}`);
       if (!res.ok) {
         document.getElementById('meetingIntro').innerHTML = '<p class="muted">Vergadering niet gevonden.</p>';
@@ -891,7 +904,7 @@
           });
         }
       });
-      if (location.hash) {
+      if (location.hash && !silent) {
         const target = document.querySelector(location.hash);
         if (target) {
           target.scrollIntoView({
@@ -902,6 +915,10 @@
       if (window.feather && typeof window.feather.replace === 'function') {
         window.feather.replace();
       }
+      const questionStates = currentQuestions.map(q => (q.processing_state || '').toLowerCase());
+      const hasPendingQuestions = questionStates.some(state => state !== 'completed');
+      const needsRefresh = hasPendingQuestions || (meetingStatus.state !== 'completed');
+      scheduleMeetingRefresh(needsRefresh);
     }
 
     loadMeeting();

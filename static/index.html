@@ -86,6 +86,30 @@
       <p class="meeting-empty" id="meetings-empty" hidden>Nog geen vergaderingen opgeslagen.</p>
     </section>
 
+    <section class="card" id="processing-card">
+      <div class="card-header">
+        <div>
+          <p class="eyebrow">Realtime status</p>
+          <h2>Verwerkingsqueue</h2>
+        </div>
+        <p class="muted" id="queue-summary">Geen lopende taken.</p>
+      </div>
+      <div class="table-wrapper">
+        <table id="queue-table">
+          <thead>
+            <tr>
+              <th>Vergadering</th>
+              <th>Wachtrij</th>
+              <th>Bezig</th>
+              <th>Fouten</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="meeting-empty" id="queue-empty" hidden>Geen wachtrij. 🎉</p>
+    </section>
+
     <section class="card" id="councillors">
       <div class="card-header">
         <div>
@@ -119,6 +143,7 @@
     const meetingLink = document.getElementById('meetingLink');
     const statusPill = document.getElementById('uploadStatus');
     const meetingBtn = document.getElementById('openMeetingBtn');
+    const queueSummary = document.getElementById('queue-summary');
 
     function formatMeetingStatus(meeting) {
       const state = (meeting.processing_state || '').toLowerCase() || 'pending';
@@ -128,6 +153,7 @@
         completed: 'Klaar',
         processing: 'Bezig',
         pending: 'Wacht',
+        queued: 'In wachtrij',
         error: 'Fout'
       };
       const label = labels[state] || 'Onbekend';
@@ -162,6 +188,7 @@
             statusPill.textContent = 'Verwerking gestart';
           }
           loadMeetings();
+          loadQueue();
         } else {
           statusPill.dataset.state = 'error';
           statusPill.textContent = 'Mislukt';
@@ -210,12 +237,13 @@
       data.meetings.forEach(m => {
         const statusInfo = formatMeetingStatus(m);
         const totalQuestions = Number(m.total_questions ?? m.question_count ?? 0) || 0;
+        const processedQuestions = Number(m.processed_questions ?? 0) || 0;
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td>${m.meeting_date || ''}</td>
           <td>${m.commission_name || ''}</td>
           <td>${m.webcast_id || '-'}</td>
-          <td>${totalQuestions}</td>
+          <td>${totalQuestions ? `${processedQuestions}/${totalQuestions}` : processedQuestions}</td>
           <td>
             <span class="status-pill" data-state="${statusInfo.state}">
               ${statusInfo.label}${statusInfo.progress ? ` (${statusInfo.progress})` : ''}
@@ -231,6 +259,48 @@
     }
 
     loadMeetings();
+    async function loadQueue() {
+      const tbody = document.querySelector('#queue-table tbody');
+      const empty = document.getElementById('queue-empty');
+      try {
+        const res = await fetch('/api/processing/queue');
+        if (!res.ok) throw new Error('Queue request failed');
+        const data = await res.json();
+        const list = data.meetings || [];
+        tbody.innerHTML = '';
+        if (!list.length) {
+          empty.hidden = false;
+          queueSummary.textContent = 'Geen openstaande taken.';
+        } else {
+          empty.hidden = true;
+          list.forEach(item => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+              <td>#${item.meeting_id} – ${item.meeting_date || ''}</td>
+              <td>${item.queued || 0}</td>
+              <td>${item.in_progress || 0}</td>
+              <td>${item.errors || 0}</td>
+            `;
+            tbody.appendChild(tr);
+          });
+          const waiting = list.reduce((sum, item) => sum + (item.queued || 0), 0);
+          const running = list.reduce((sum, item) => sum + (item.in_progress || 0), 0);
+          const errorCount = list.reduce((sum, item) => sum + (item.errors || 0), 0);
+          queueSummary.textContent = `${waiting} wachtend, ${running} bezig${errorCount ? `, ${errorCount} fouten` : ''}.`;
+        }
+        if (data.queue && typeof data.queue.queued_in_memory === 'number') {
+          queueSummary.textContent += ` (buffer: ${data.queue.queued_in_memory})`;
+        }
+      } catch (err) {
+        queueSummary.textContent = 'Kon queue niet laden.';
+      }
+    }
+
+    loadQueue();
+    setInterval(() => {
+      loadMeetings();
+      loadQueue();
+    }, 10000);
 
     document.getElementById('meetings-table').addEventListener('click', async (e) => {
       const btn = e.target.closest('.delete-meeting');
