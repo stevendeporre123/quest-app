@@ -4,3 +4,4 @@ python-docx
 openai
 python-dotenv
 zeep
+python-multipart
