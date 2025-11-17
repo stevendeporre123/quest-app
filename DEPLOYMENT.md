@@ -27,6 +27,7 @@ echo "<token>" | docker login ghcr.io -u <github-username> --password-stdin
 ```
 
 Portainer exposes the same option under *Settings → Registries*. Add `ghcr.io` with the same credentials and select that registry while deploying the stack. Once the registry entry exists you only need to configure `QUEST_IMAGE` in the stack's environment section when you want a non-default tag.
+The Dockerfile installs the requirements and defaults `QUEST_DB_PATH` to `/data/quest.db`. The `/data` directory is exposed as a volume so the SQLite database and uploaded source files survive container restarts. The compose file also references the published image `ghcr.io/stevendeporre123/quest-app:${QUEST_IMAGE_TAG:-main}` so Portainer and other orchestrators can pull a ready-made build. If you need a different tag, set `QUEST_IMAGE_TAG` in your stack (for example `QUEST_IMAGE_TAG=v1.2.3`).
 
 ## 3. Persistent storage
 
@@ -55,10 +56,10 @@ The container only needs an `OPENAI_API_KEY` besides the `QUEST_*` paths defined
 in `docker-compose.yml`. Supply it via whatever mechanism fits your deployment:
 
 - When running `docker compose` directly, add it to a local `.env` file so
-  Compose can interpolate `${OPENAI_API_KEY}` (and optionally `QUEST_IMAGE`)
+  Compose can interpolate `${OPENAI_API_KEY}` (and optionally `QUEST_IMAGE_TAG`)
   inside the service definition.
 - When running the stack inside Portainer (or another orchestrator), configure
-  `OPENAI_API_KEY` (and optionally `QUEST_IMAGE`) in the environment
+  `OPENAI_API_KEY` (and optionally `QUEST_IMAGE_TAG`) in the environment
   variable editor. The compose file already exposes them through the
   `environment` section, so no `.env` file is required.
 
