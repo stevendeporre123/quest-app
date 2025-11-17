@@ -5,8 +5,10 @@ This document describes how to build and run Quest inside Docker and how to publ
 ## 1. Prerequisites
 
 - Docker Engine and Docker Compose v2 on the EC2 host.
-- Existing Traefik container that exposes the external network named `traefik` (create it once using `docker network create traefik`).
-- `.env` file in the project root that contains the same secrets the app uses locally (OpenAI keys, etc.).
+- Existing Traefik container that exposes the external network named `proxy` (create it once using `docker network create proxy`).
+- Access to the secrets the app needs (OpenAI keys, etc.). You can either keep
+  them in a local `.env` file when running `docker compose` yourself or inject
+  them through your orchestrator (Portainer, ECS, ...).
 
 ## 2. Build the image
 
@@ -14,7 +16,17 @@ This document describes how to build and run Quest inside Docker and how to publ
 docker compose build
 ```
 
-The Dockerfile installs the requirements and defaults `QUEST_DB_PATH` to `/data/quest.db`. The `/data` directory is exposed as a volume so the SQLite database and uploaded source files survive container restarts.
+The Dockerfile installs the requirements and defaults `QUEST_DB_PATH` to `/data/quest.db`. The `/data` directory is exposed as a volume so the SQLite database and uploaded source files survive container restarts. The compose file also references the published image `${QUEST_IMAGE:-ghcr.io/stevendeporre123/quest-app:main}` so Portainer and other orchestrators can pull a ready-made build. If you need a different tag or digest, set `QUEST_IMAGE` to the full reference (for example `QUEST_IMAGE=ghcr.io/stevendeporre123/quest-app:v1.2.3` or `QUEST_IMAGE=ghcr.io/stevendeporre123/quest-app@sha256:<digest>`). Use the same variable to point at a mirror in a different registry.
+
+### Authenticating with GHCR
+
+The package on GitHub Container Registry (GHCR) is private, so Docker (and Portainer) must authenticate before it can pull tags like `main`. Create a GitHub personal access token with the `read:packages` scope and run:
+
+```bash
+echo "<token>" | docker login ghcr.io -u <github-username> --password-stdin
+```
+
+Portainer exposes the same option under *Settings → Registries*. Add `ghcr.io` with the same credentials and select that registry while deploying the stack. Once the registry entry exists you only need to configure `QUEST_IMAGE` in the stack's environment section when you want a non-default tag.
 
 ## 3. Persistent storage
 
@@ -27,7 +39,7 @@ docker run --rm -v quest_data:/data -v "$PWD:/backup" alpine \
 
 ## 4. Running with Traefik
 
-Edit `docker-compose.yml` and replace `quest.example.com` with your real hostname. The Traefik labels assume an entrypoint named `websecure` and a certificate resolver named `letsencrypt`; update them if your Traefik configuration uses different names.
+Edit `docker-compose.yml` and replace `quest.smarterhomes.be` with your real hostname if necessary. The Traefik labels assume an entrypoint named `websecure` and a certificate resolver named `le`; update them if your Traefik configuration uses different names.
 
 Start the service:
 
@@ -39,7 +51,19 @@ Traefik will automatically route HTTPS traffic to the Quest container and handle
 
 ## 5. Environment variables
 
-All environment variables from `.env` are passed to the container. Add any extra values to `.env` (for example `OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, etc.). The `QUEST_DB_PATH` variable is set inside `docker-compose.yml`; change it if you prefer a different mount point.
+The container only needs an `OPENAI_API_KEY` besides the `QUEST_*` paths defined
+in `docker-compose.yml`. Supply it via whatever mechanism fits your deployment:
+
+- When running `docker compose` directly, add it to a local `.env` file so
+  Compose can interpolate `${OPENAI_API_KEY}` (and optionally `QUEST_IMAGE`)
+  inside the service definition.
+- When running the stack inside Portainer (or another orchestrator), configure
+  `OPENAI_API_KEY` (and optionally `QUEST_IMAGE`) in the environment
+  variable editor. The compose file already exposes them through the
+  `environment` section, so no `.env` file is required.
+
+Add any future secrets to the compose file in the same fashion so they can be
+overridden either by `.env` or by the orchestration layer.
 
 ## 6. Updating
 
@@ -56,6 +80,8 @@ The named volume keeps the database intact between deployments.
 ## 7. Troubleshooting
 
 - Verify the Traefik network exists (`docker network ls`). If not, create it and restart Traefik before launching Quest.
+- A `manifest unknown` error indicates Docker cannot find the referenced tag or digest. Double-check the `QUEST_IMAGE` value and
+  run `docker pull <same value>` manually (after logging in to GHCR) to confirm the image exists.
 - Check container logs with `docker compose logs -f quest`.
 - Ensure filesystem permissions allow the container to create `/data/quest.db` and `/data/uploads` on first boot; the named volume handles this automatically.
 
