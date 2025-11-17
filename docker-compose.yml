@@ -9,6 +9,7 @@ services:
       - .env
     environment:
       QUEST_DB_PATH: /data/quest.db
+      QUEST_STORAGE_DIR: /data/uploads
     volumes:
       - quest_data:/data
     networks:

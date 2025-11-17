@@ -1,11 +1,15 @@
-from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
-from fastapi.staticfiles import StaticFiles
-from pathlib import Path
-import tempfile
+import os
+from datetime import datetime
 import json
 import logging
 import sqlite3
+from pathlib import Path
+from uuid import uuid4
+import tempfile
+
+from fastapi import FastAPI, UploadFile, File, Form
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from db import get_db, init_db, upsert_councillor, list_councillors
 from xml_utils import parse_agenda_xml
@@ -23,6 +27,17 @@ app = FastAPI()
 
 static_dir = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=static_dir, html=True), name="static")
+
+
+def _default_storage_dir() -> Path:
+    db_path = os.environ.get("QUEST_DB_PATH")
+    if db_path:
+        return Path(db_path).resolve().parent / "uploads"
+    return Path(__file__).parent / "data" / "uploads"
+
+
+storage_dir = Path(os.environ.get("QUEST_STORAGE_DIR", _default_storage_dir()))
+storage_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _coerce_list(value):
@@ -77,6 +92,13 @@ def councillors_page():
     return html
 
 
+def _sanitize_filename(name: str, fallback: str) -> str:
+    candidate = (name or fallback or "uploaded").strip().lower()
+    allowed = [c if c.isalnum() else "-" for c in candidate]
+    sanitized = "".join(allowed).strip("-")
+    return sanitized or fallback or "uploaded"
+
+
 @app.post("/api/upload")
 async def upload(
     agenda: UploadFile = File(...),
@@ -89,8 +111,21 @@ async def upload(
         getattr(agenda, "filename", "unknown"),
         getattr(transcript, "filename", "unknown"),
     )
-    xml_str = (await agenda.read()).decode("utf-8", errors="ignore")
-    vtt_str = (await transcript.read()).decode("utf-8", errors="ignore")
+    agenda_bytes = await agenda.read()
+    transcript_bytes = await transcript.read()
+    xml_str = agenda_bytes.decode("utf-8", errors="ignore")
+    vtt_str = transcript_bytes.decode("utf-8", errors="ignore")
+
+    upload_dir = storage_dir / (
+        datetime.utcnow().strftime("%Y%m%d-%H%M%S") + f"-{uuid4().hex[:8]}"
+    )
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    agenda_path = upload_dir / f"agenda-{_sanitize_filename(agenda.filename, 'xml')}.xml"
+    transcript_path = upload_dir / (
+        f"transcript-{_sanitize_filename(transcript.filename, 'vtt')}.vtt"
+    )
+    agenda_path.write_bytes(agenda_bytes)
+    transcript_path.write_bytes(transcript_bytes)
 
     oral_questions, meeting_date, commission_name = parse_agenda_xml(xml_str)
     question_lookup = {
@@ -162,13 +197,15 @@ async def upload(
     cur = conn.cursor()
 
     cur.execute(
-        "INSERT INTO meetings (meeting_date, commission_name, webcast_id, source_questions_json, transcript_text) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO meetings (meeting_date, commission_name, webcast_id, source_questions_json, transcript_text, agenda_file_path, transcript_file_path) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
             meeting_date,
             commission_name,
             webcast_id,
             json.dumps(oral_questions, ensure_ascii=False),
             vtt_str,
+            str(agenda_path),
+            str(transcript_path),
         ),
     )
     meeting_id = cur.lastrowid

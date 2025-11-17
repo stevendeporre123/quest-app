@@ -31,7 +31,9 @@ def init_db():
             commission_name TEXT,
             webcast_id TEXT,
             source_questions_json TEXT,
-            transcript_text TEXT
+            transcript_text TEXT,
+            agenda_file_path TEXT,
+            transcript_file_path TEXT
         )"""
     )
 
@@ -97,6 +99,8 @@ def init_db():
     _ensure_column(conn, "questions", "answer_status", "TEXT DEFAULT 'draft'")
     _ensure_column(conn, "meetings", "source_questions_json", "TEXT")
     _ensure_column(conn, "meetings", "transcript_text", "TEXT")
+    _ensure_column(conn, "meetings", "agenda_file_path", "TEXT")
+    _ensure_column(conn, "meetings", "transcript_file_path", "TEXT")
 
     conn.commit()
     conn.close()

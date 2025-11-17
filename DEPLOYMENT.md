@@ -14,11 +14,11 @@ This document describes how to build and run Quest inside Docker and how to publ
 docker compose build
 ```
 
-The Dockerfile installs the requirements and defaults `QUEST_DB_PATH` to `/data/quest.db`. The `/data` directory is exposed as a volume so the SQLite database survives container restarts.
+The Dockerfile installs the requirements and defaults `QUEST_DB_PATH` to `/data/quest.db`. The `/data` directory is exposed as a volume so the SQLite database and uploaded source files survive container restarts.
 
 ## 3. Persistent storage
 
-The provided `docker-compose.yml` mounts the named volume `quest_data` at `/data`. If you already have a `quest.db`, copy it to a safe place and restore it after the first run:
+The provided `docker-compose.yml` mounts the named volume `quest_data` at `/data`. Besides the SQLite database, uploads are written to `/data/uploads` (configurable with `QUEST_STORAGE_DIR`). If you already have a `quest.db`, copy it to a safe place and restore it after the first run:
 
 ```bash
 docker run --rm -v quest_data:/data -v "$PWD:/backup" alpine \
@@ -57,6 +57,6 @@ The named volume keeps the database intact between deployments.
 
 - Verify the Traefik network exists (`docker network ls`). If not, create it and restart Traefik before launching Quest.
 - Check container logs with `docker compose logs -f quest`.
-- Ensure filesystem permissions allow the container to create `/data/quest.db` on first boot; the named volume handles this automatically.
+- Ensure filesystem permissions allow the container to create `/data/quest.db` and `/data/uploads` on first boot; the named volume handles this automatically.
 
 You can adapt these steps to other orchestration tools (ECS, Nomad, etc.) by reusing the same Docker image and environment variables.
