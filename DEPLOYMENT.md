@@ -5,7 +5,7 @@ This document describes how to build and run Quest inside Docker and how to publ
 ## 1. Prerequisites
 
 - Docker Engine and Docker Compose v2 on the EC2 host.
-- Existing Traefik container that exposes the external network named `traefik` (create it once using `docker network create traefik`).
+- Existing Traefik container that exposes the external network named `proxy` (create it once using `docker network create proxy`).
 - Access to the secrets the app needs (OpenAI keys, etc.). You can either keep
   them in a local `.env` file when running `docker compose` yourself or inject
   them through your orchestrator (Portainer, ECS, ...).
@@ -29,7 +29,7 @@ docker run --rm -v quest_data:/data -v "$PWD:/backup" alpine \
 
 ## 4. Running with Traefik
 
-Edit `docker-compose.yml` and replace `quest.example.com` with your real hostname. The Traefik labels assume an entrypoint named `websecure` and a certificate resolver named `letsencrypt`; update them if your Traefik configuration uses different names.
+Edit `docker-compose.yml` and replace `quest.smarterhomes.be` with your real hostname if necessary. The Traefik labels assume an entrypoint named `websecure` and a certificate resolver named `le`; update them if your Traefik configuration uses different names.
 
 Start the service:
 

@@ -14,16 +14,16 @@ services:
       - quest_data:/data
     networks:
       - default
-      - traefik
+      - proxy
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.quest.rule=Host(`quest.example.com`)"
+      - "traefik.http.routers.quest.rule=Host(`quest.smarterhomes.be`)"
       - "traefik.http.routers.quest.entrypoints=websecure"
-      - "traefik.http.routers.quest.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.quest.tls.certresolver=le"
       - "traefik.http.services.quest.loadbalancer.server.port=8000"
 
 networks:
-  traefik:
+  proxy:
     external: true
 
 volumes:
