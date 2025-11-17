@@ -1,26 +1,29 @@
 services:
   quest:
-    image: ghcr.io/stevendeporre123/quest-app:latest
+    image: ghcr.io/stevendeporre123/quest-app:${QUEST_IMAGE_TAG:-main}
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
       QUEST_DB_PATH: /data/quest.db
       QUEST_STORAGE_DIR: /data/uploads
+      # Application secrets can be provided through any container orchestrator
+      # (Portainer, Docker Compose CLI, etc.). When running via `docker compose`
+      # you can still use a local `.env` file because Compose automatically
+      # injects its values into the environment.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     volumes:
       - quest_data:/data
     networks:
       - default
-      - traefik
+      - proxy
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.quest.rule=Host(`quest.example.com`)"
+      - "traefik.http.routers.quest.rule=Host(`quest.smarterhomes.be`)"
       - "traefik.http.routers.quest.entrypoints=websecure"
-      - "traefik.http.routers.quest.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.quest.tls.certresolver=le"
       - "traefik.http.services.quest.loadbalancer.server.port=8000"
 
 networks:
-  traefik:
+  proxy:
     external: true
 
 volumes:

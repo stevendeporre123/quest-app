@@ -5,8 +5,10 @@ This document describes how to build and run Quest inside Docker and how to publ
 ## 1. Prerequisites
 
 - Docker Engine and Docker Compose v2 on the EC2 host.
-- Existing Traefik container that exposes the external network named `traefik` (create it once using `docker network create traefik`).
-- `.env` file in the project root that contains the same secrets the app uses locally (OpenAI keys, etc.).
+- Existing Traefik container that exposes the external network named `proxy` (create it once using `docker network create proxy`).
+- Access to the secrets the app needs (OpenAI keys, etc.). You can either keep
+  them in a local `.env` file when running `docker compose` yourself or inject
+  them through your orchestrator (Portainer, ECS, ...).
 
 ## 2. Build the image
 
@@ -14,7 +16,7 @@ This document describes how to build and run Quest inside Docker and how to publ
 docker compose build
 ```
 
-The Dockerfile installs the requirements and defaults `QUEST_DB_PATH` to `/data/quest.db`. The `/data` directory is exposed as a volume so the SQLite database and uploaded source files survive container restarts.
+The Dockerfile installs the requirements and defaults `QUEST_DB_PATH` to `/data/quest.db`. The `/data` directory is exposed as a volume so the SQLite database and uploaded source files survive container restarts. The compose file also references the published image `ghcr.io/stevendeporre123/quest-app:${QUEST_IMAGE_TAG:-main}` so Portainer and other orchestrators can pull a ready-made build. If you need a different tag, set `QUEST_IMAGE_TAG` in your stack (for example `QUEST_IMAGE_TAG=v1.2.3`).
 
 ## 3. Persistent storage
 
@@ -27,7 +29,7 @@ docker run --rm -v quest_data:/data -v "$PWD:/backup" alpine \
 
 ## 4. Running with Traefik
 
-Edit `docker-compose.yml` and replace `quest.example.com` with your real hostname. The Traefik labels assume an entrypoint named `websecure` and a certificate resolver named `letsencrypt`; update them if your Traefik configuration uses different names.
+Edit `docker-compose.yml` and replace `quest.smarterhomes.be` with your real hostname if necessary. The Traefik labels assume an entrypoint named `websecure` and a certificate resolver named `le`; update them if your Traefik configuration uses different names.
 
 Start the service:
 
@@ -39,7 +41,19 @@ Traefik will automatically route HTTPS traffic to the Quest container and handle
 
 ## 5. Environment variables
 
-All environment variables from `.env` are passed to the container. Add any extra values to `.env` (for example `OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, etc.). The `QUEST_DB_PATH` variable is set inside `docker-compose.yml`; change it if you prefer a different mount point.
+The container only needs an `OPENAI_API_KEY` besides the `QUEST_*` paths defined
+in `docker-compose.yml`. Supply it via whatever mechanism fits your deployment:
+
+- When running `docker compose` directly, add it to a local `.env` file so
+  Compose can interpolate `${OPENAI_API_KEY}` (and optionally `QUEST_IMAGE_TAG`)
+  inside the service definition.
+- When running the stack inside Portainer (or another orchestrator), configure
+  `OPENAI_API_KEY` (and optionally `QUEST_IMAGE_TAG`) in the environment
+  variable editor. The compose file already exposes them through the
+  `environment` section, so no `.env` file is required.
+
+Add any future secrets to the compose file in the same fashion so they can be
+overridden either by `.env` or by the orchestration layer.
 
 ## 6. Updating
 
