@@ -8,12 +8,13 @@ from uuid import uuid4
 import tempfile
 import threading
 import queue
+from difflib import SequenceMatcher
 
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from db import get_db, init_db, upsert_councillor, list_councillors
+from db import get_db, init_db, upsert_councillor, list_councillors, list_taxonomy
 from xml_utils import parse_agenda_xml
 from ai_utils import align_questions_with_vtt
 
@@ -328,6 +329,15 @@ class QuestionProcessingQueue:
         )
         conn.commit()
         councillors = list_councillors(conn)
+        taxonomy_items = list_taxonomy(conn)
+        taxonomy_lookup = _build_taxonomy_lookup(taxonomy_items)
+        cur.execute(
+            "SELECT id, dossier_id, sequence_nr FROM questions WHERE meeting_id = ?",
+            (meeting["id"],),
+        )
+        meeting_question_rows = cur.fetchall()
+        question_mapping = _question_index_map(meeting_question_rows)
+        question_lookup_by_id = {row["id"]: row for row in meeting_question_rows}
         meeting_data = dict(meeting)
         question_data = dict(question)
         root_data = dict(root_question) if root_question else None
@@ -340,7 +350,9 @@ class QuestionProcessingQueue:
 
         source_question = _resolve_source_question(meeting_data, question_data)
         try:
-            ai_items = align_questions_with_vtt([source_question], transcript_text, councillors)
+            ai_items = align_questions_with_vtt(
+                [source_question], transcript_text, councillors, taxonomy_items
+            )
         except Exception as exc:
             self._mark_question_error(question_id, meeting_data["id"], str(exc))
             return
@@ -366,6 +378,15 @@ class QuestionProcessingQueue:
         item.setdefault("answer_text_verbatim", item.get("answer_text_raw", ""))
         item.setdefault("answer_text_raw", "")
         item.setdefault("answer_status", "draft")
+        normalized_topics = _normalize_topics(item.get("topics"), taxonomy_lookup)
+        suggested_root_id = _resolve_related_target(item.get("related_question_keys"), question_mapping)
+        group_label_value = (question_data.get("group_label") or "").strip()
+        if not question_data.get("group_root_question_id") and suggested_root_id and suggested_root_id != question_id:
+            target_seq = question_lookup_by_id.get(suggested_root_id, {}).get("sequence_nr") or suggested_root_id
+            group_label_value = group_label_value or f"Zie antwoord bij vraag {target_seq} (AI-voorstel)."
+            question_data["group_root_question_id"] = suggested_root_id
+            question_data["group_label"] = group_label_value
+        finish_ts = _now_iso()
         finish_ts = _now_iso()
 
         conn = get_db()
@@ -402,13 +423,31 @@ class QuestionProcessingQueue:
                 item.get("answer_text_raw") or "",
                 item.get("summary") or "",
                 json.dumps(item.get("actions") or [], ensure_ascii=False),
-                json.dumps(item.get("topics") or [], ensure_ascii=False),
+                json.dumps(normalized_topics or item.get("topics") or [], ensure_ascii=False),
                 item.get("note") or "",
                 item.get("answer_status") or "draft",
                 finish_ts,
                 question_id,
             ),
         )
+        if question_data.get("group_root_question_id") and group_label_value:
+            cur.execute(
+                """
+                UPDATE questions
+                SET group_root_question_id = ?,
+                    group_label = CASE
+                        WHEN COALESCE(TRIM(group_label), '') = '' THEN ?
+                        ELSE group_label
+                    END
+                WHERE id = ?
+                """,
+                (
+                    question_data["group_root_question_id"],
+                    group_label_value,
+                    question_id,
+                ),
+            )
+        _replace_auto_followups(cur, question_id, item.get("followups"), source="ai")
         conn.commit()
         conn.close()
         _update_meeting_processing_summary(meeting_data["id"])
@@ -515,6 +554,160 @@ QUESTION_INSERT_SQL = (
     + ",".join(["?"] * len(QUESTION_INSERT_COLUMNS))
     + ")"
 )
+
+
+def _build_taxonomy_lookup(items: List[dict]) -> Dict[str, str]:
+    lookup = {}
+    for item in items or []:
+        label = (item.get("label") or "").strip()
+        if not label:
+            continue
+        lookup[label.lower()] = label
+        for syn in item.get("synonyms") or []:
+            syn_label = (syn or "").strip()
+            if syn_label:
+                lookup[syn_label.lower()] = label
+    lookup.setdefault("overig", "Overig")
+    return lookup
+
+
+def _normalize_topics(topics: Optional[List[str]], lookup: Dict[str, str]) -> List[str]:
+    normalized = []
+    for topic in topics or []:
+        topic_str = (topic or "").strip()
+        if not topic_str:
+            continue
+        canonical = lookup.get(topic_str.lower())
+        if canonical and canonical not in normalized:
+            normalized.append(canonical)
+    if not normalized and lookup.get("overig"):
+        normalized.append(lookup["overig"])
+    return normalized
+
+
+def _question_index_map(rows: List[sqlite3.Row]) -> Dict[str, int]:
+    mapping = {}
+    for row in rows:
+        qid = row["id"]
+        dossier = (row["dossier_id"] or "").strip().lower()
+        seq = (row["sequence_nr"] or "").strip().lower()
+        if dossier:
+            mapping[dossier] = qid
+        if seq:
+            mapping[seq] = qid
+            mapping[f"seq:{seq}"] = qid
+    return mapping
+
+
+def _resolve_related_target(related_keys: List[str], mapping: Dict[str, int]) -> Optional[int]:
+    for key in related_keys or []:
+        token = (key or "").strip().lower()
+        if not token:
+            continue
+        if token in mapping:
+            return mapping[token]
+        seq_key = f"seq:{token}"
+        if seq_key in mapping:
+            return mapping[seq_key]
+    return None
+
+
+def _replace_auto_followups(cur, question_id: int, followups: List[dict], source: str = "ai"):
+    if followups is None:
+        return
+    cur.execute(
+        "DELETE FROM question_followups WHERE question_id = ? AND source = ?",
+        (question_id, source),
+    )
+    for item in followups:
+        if not isinstance(item, dict):
+            continue
+        cur.execute(
+            """
+            INSERT INTO question_followups (
+                question_id,
+                speaker_given_name,
+                speaker_family_name,
+                speaker_faction,
+                type,
+                note,
+                text,
+                start_time,
+                end_time,
+                status,
+                source,
+                updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                question_id,
+                (item.get("speaker_given_name") or "").strip(),
+                (item.get("speaker_family_name") or "").strip(),
+                (item.get("speaker_faction") or "").strip(),
+                (item.get("type") or "followup").strip() or "followup",
+                (item.get("note") or "").strip(),
+                (item.get("text") or "").strip(),
+                (item.get("start_time") or "").strip(),
+                (item.get("end_time") or "").strip(),
+                "proposed",
+                source,
+                _now_iso(),
+            ),
+        )
+
+
+def _auto_group_similar_questions(meeting_id: int, threshold: float = 0.88):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, sequence_nr, question_text_xml, question_text_raw, group_root_question_id
+        FROM questions
+        WHERE meeting_id = ?
+        ORDER BY CAST(sequence_nr AS INTEGER)
+        """,
+        (meeting_id,),
+    )
+    rows = cur.fetchall()
+    for idx, row in enumerate(rows):
+        if row["group_root_question_id"]:
+            continue
+        text = (row["question_text_xml"] or row["question_text_raw"] or "").strip()
+        if not text:
+            continue
+        for prev in rows[:idx]:
+            prev_text = (prev["question_text_xml"] or prev["question_text_raw"] or "").strip()
+            if not prev_text:
+                continue
+            ratio = SequenceMatcher(None, text, prev_text).ratio()
+            if ratio >= threshold:
+                label = f"Zie antwoord bij vraag {prev['sequence_nr'] or prev['id']} (automatisch)."
+                cur.execute(
+                    """
+                    UPDATE questions
+                    SET group_root_question_id = COALESCE(group_root_question_id, ?),
+                        group_label = CASE
+                            WHEN COALESCE(TRIM(group_label), '') = '' THEN ?
+                            ELSE group_label
+                        END
+                    WHERE id = ? AND (group_root_question_id IS NULL OR group_root_question_id = id)
+                    """,
+                    (prev["id"], label, row["id"]),
+                )
+                break
+    conn.commit()
+    conn.close()
+
+
+def _serialize_synonyms(values: Optional[List[str]]) -> str:
+    cleaned = []
+    for val in values or []:
+        if val is None:
+            continue
+        text = str(val).strip()
+        if text:
+            cleaned.append(text)
+    return json.dumps(cleaned, ensure_ascii=False)
 
 
 @app.on_event("startup")
@@ -707,6 +900,7 @@ async def upload(
 
     conn.commit()
     conn.close()
+    _auto_group_similar_questions(meeting_id)
 
     if oral_questions:
         _enqueue_meeting_processing(meeting_id)
@@ -837,6 +1031,20 @@ class FollowupUpdate(BaseModel):
     text: Optional[str] = None
     start_time: Optional[str] = None
     end_time: Optional[str] = None
+
+
+class TaxonomyCreate(BaseModel):
+    label: str
+    parent_id: Optional[int] = None
+    priority: int = 0
+    synonyms: Optional[List[str]] = []
+
+
+class TaxonomyUpdate(BaseModel):
+    label: Optional[str] = None
+    parent_id: Optional[int] = None
+    priority: Optional[int] = None
+    synonyms: Optional[List[str]] = None
 
 
 @app.post("/api/questions", status_code=201)
@@ -1060,8 +1268,10 @@ def create_followup(question_id: int, payload: FollowupCreate):
             text,
             start_time,
             end_time,
+            status,
+            source,
             updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             question_id,
@@ -1073,6 +1283,8 @@ def create_followup(question_id: int, payload: FollowupCreate):
             (payload.text or "").strip(),
             (payload.start_time or "").strip(),
             (payload.end_time or "").strip(),
+            "confirmed",
+            "manual",
             _now_iso(),
         ),
     )
@@ -1324,6 +1536,7 @@ def restore_missing_questions(meeting_id: int):
     conn.commit()
     conn.close()
     if added:
+        _auto_group_similar_questions(meeting_id)
         _enqueue_meeting_processing(meeting_id)
     _update_meeting_processing_summary(meeting_id)
     return {"status": "ok", "added": added}
@@ -1437,6 +1650,125 @@ def get_councillors():
     data = list_councillors(conn)
     conn.close()
     return {"councillors": data}
+
+
+@app.get("/api/taxonomy")
+def get_taxonomy():
+    conn = get_db()
+    data = list_taxonomy(conn)
+    conn.close()
+    return {"taxonomy": data}
+
+
+@app.post("/api/taxonomy", status_code=201)
+def create_taxonomy_node(payload: TaxonomyCreate):
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO topics_taxonomy (label, parent_id, priority, synonyms_json, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                payload.label.strip(),
+                payload.parent_id,
+                payload.priority,
+                _serialize_synonyms(payload.synonyms),
+                _now_iso(),
+            ),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        conn.close()
+        return JSONResponse({"error": "Label bestaat al."}, status_code=400)
+    cur.execute("SELECT * FROM topics_taxonomy WHERE id = ?", (cur.lastrowid,))
+    row = cur.fetchone()
+    conn.close()
+    return {
+        "status": "created",
+        "node": {
+            "id": row["id"],
+            "label": row["label"],
+            "parent_id": row["parent_id"],
+            "priority": row["priority"],
+            "synonyms": json.loads(row["synonyms_json"] or "[]"),
+        },
+    }
+
+
+@app.patch("/api/taxonomy/{node_id}")
+def update_taxonomy_node(node_id: int, payload: TaxonomyUpdate):
+    data = payload.model_dump(exclude_unset=True)
+    if not data:
+        return {"status": "no changes"}
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM topics_taxonomy WHERE id = ?", (node_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return JSONResponse({"error": "Taxonomienode niet gevonden"}, status_code=404)
+    fields = []
+    values = []
+    if "label" in data and data["label"] is not None:
+        fields.append("label = ?")
+        values.append(data["label"].strip())
+    if "parent_id" in data:
+        fields.append("parent_id = ?")
+        values.append(data["parent_id"])
+    if "priority" in data and data["priority"] is not None:
+        fields.append("priority = ?")
+        values.append(int(data["priority"]))
+    if "synonyms" in data:
+        fields.append("synonyms_json = ?")
+        values.append(_serialize_synonyms(data["synonyms"]))
+    if not fields:
+        conn.close()
+        return {"status": "no changes"}
+    fields.append("updated_at = ?")
+    values.append(_now_iso())
+    values.append(node_id)
+    try:
+        cur.execute(
+            f"UPDATE topics_taxonomy SET {', '.join(fields)} WHERE id = ?",
+            values,
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        conn.close()
+        return JSONResponse({"error": "Label bestaat al."}, status_code=400)
+    cur.execute("SELECT * FROM topics_taxonomy WHERE id = ?", (node_id,))
+    node = cur.fetchone()
+    conn.close()
+    return {
+        "status": "ok",
+        "node": {
+            "id": node["id"],
+            "label": node["label"],
+            "parent_id": node["parent_id"],
+            "priority": node["priority"],
+            "synonyms": json.loads(node["synonyms_json"] or "[]"),
+        },
+    }
+
+
+@app.delete("/api/taxonomy/{node_id}")
+def delete_taxonomy_node(node_id: int):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM topics_taxonomy WHERE id = ?", (node_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return JSONResponse({"error": "Taxonomienode niet gevonden"}, status_code=404)
+    cur.execute("UPDATE topics_taxonomy SET parent_id = NULL WHERE parent_id = ?", (node_id,))
+    cur.execute("DELETE FROM topics_taxonomy WHERE id = ?", (node_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "deleted", "node_id": node_id}
 
 
 @app.get("/api/question-people")

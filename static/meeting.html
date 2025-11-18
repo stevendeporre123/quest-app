@@ -622,12 +622,13 @@
       const speaker = formatName(item.speaker_given_name, item.speaker_family_name) || 'Onbekend';
       const faction = item.speaker_faction ? ` (${item.speaker_faction})` : '';
       const type = item.type || 'followup';
+      const status = (item.status || 'proposed').toUpperCase();
       const timeDisplay = formatTimeRange(item.start_time, item.end_time);
       const textHtml = (item.text || '').replace(/\n/g, '<br>');
       return `
         <li class="followup-item" data-followup-id="${item.id}">
           <div class="followup-meta">
-            <strong>${htmlEscape(speaker)}</strong>${htmlEscape(faction)} – ${htmlEscape(type)} – ${timeDisplay}
+            <strong>${htmlEscape(speaker)}</strong>${htmlEscape(faction)} – ${htmlEscape(type)} – ${timeDisplay} – <span class="status-pill" data-state="${item.status || 'proposed'}">${htmlEscape(status)}</span>
           </div>
           <p>${textHtml || '<span class="muted">Geen tekst</span>'}</p>
           <div class="followup-actions">

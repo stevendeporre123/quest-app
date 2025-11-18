@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import json
 from pathlib import Path
 
 DB_PATH = Path(os.environ.get("QUEST_DB_PATH", Path(__file__).parent / "quest.db"))
@@ -120,9 +121,25 @@ def init_db():
             text TEXT,
             start_time TEXT,
             end_time TEXT,
+            status TEXT DEFAULT 'proposed',
+            source TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT,
             FOREIGN KEY (question_id) REFERENCES questions(id)
+        )"""
+    )
+
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS topics_taxonomy (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            label TEXT NOT NULL,
+            parent_id INTEGER,
+            priority INTEGER DEFAULT 0,
+            synonyms_json TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT,
+            UNIQUE(label),
+            FOREIGN KEY (parent_id) REFERENCES topics_taxonomy(id)
         )"""
     )
 
@@ -148,6 +165,8 @@ def init_db():
     _ensure_column(conn, "questions", "source_question_idx", "INTEGER")
     _ensure_column(conn, "questions", "group_root_question_id", "INTEGER")
     _ensure_column(conn, "questions", "group_label", "TEXT")
+    _ensure_column(conn, "question_followups", "status", "TEXT DEFAULT 'proposed'")
+    _ensure_column(conn, "question_followups", "source", "TEXT")
 
     conn.commit()
     conn.close()
@@ -188,6 +207,32 @@ def list_councillors(conn):
            ORDER BY family_name, given_name"""
     )
     return [dict(row) for row in cur.fetchall()]
+
+
+def list_taxonomy(conn):
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT id, label, parent_id, priority,
+                  COALESCE(synonyms_json, '[]') AS synonyms_json
+           FROM topics_taxonomy
+           ORDER BY priority DESC, LOWER(label)"""
+    )
+    items = []
+    for row in cur.fetchall():
+        try:
+            synonyms = json.loads(row["synonyms_json"])
+        except Exception:
+            synonyms = []
+        items.append(
+            {
+                "id": row["id"],
+                "label": row["label"],
+                "parent_id": row["parent_id"],
+                "priority": row["priority"],
+                "synonyms": synonyms,
+            }
+        )
+    return items
 
 
 if __name__ == "__main__":
