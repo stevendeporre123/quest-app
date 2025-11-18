@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import json
 from pathlib import Path
 
 DB_PATH = Path(os.environ.get("QUEST_DB_PATH", Path(__file__).parent / "quest.db"))
@@ -33,7 +34,13 @@ def init_db():
             source_questions_json TEXT,
             transcript_text TEXT,
             agenda_file_path TEXT,
-            transcript_file_path TEXT
+            transcript_file_path TEXT,
+            processing_state TEXT DEFAULT 'pending',
+            processing_started_at TEXT,
+            processing_completed_at TEXT,
+            processing_error TEXT,
+            total_questions INTEGER DEFAULT 0,
+            processed_questions INTEGER DEFAULT 0
         )"""
     )
 
@@ -75,6 +82,14 @@ def init_db():
             topics_json TEXT,
             note TEXT,
             answer_status TEXT DEFAULT 'draft',
+            processing_state TEXT DEFAULT 'pending',
+            processing_started_at TEXT,
+            processing_completed_at TEXT,
+            processing_error TEXT,
+            processing_attempts INTEGER DEFAULT 0,
+            source_question_idx INTEGER,
+            group_root_question_id INTEGER,
+            group_label TEXT,
 
             FOREIGN KEY (meeting_id) REFERENCES meetings(id)
         )"""
@@ -94,6 +109,40 @@ def init_db():
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_councillors_given_family ON councillors(given_name, family_name)"
     )
 
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS question_followups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            question_id INTEGER NOT NULL,
+            speaker_given_name TEXT,
+            speaker_family_name TEXT,
+            speaker_faction TEXT,
+            type TEXT,
+            note TEXT,
+            text TEXT,
+            start_time TEXT,
+            end_time TEXT,
+            status TEXT DEFAULT 'proposed',
+            source TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT,
+            FOREIGN KEY (question_id) REFERENCES questions(id)
+        )"""
+    )
+
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS topics_taxonomy (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            label TEXT NOT NULL,
+            parent_id INTEGER,
+            priority INTEGER DEFAULT 0,
+            synonyms_json TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT,
+            UNIQUE(label),
+            FOREIGN KEY (parent_id) REFERENCES topics_taxonomy(id)
+        )"""
+    )
+
     _ensure_column(conn, "questions", "question_text_xml", "TEXT")
     _ensure_column(conn, "questions", "answer_text_verbatim", "TEXT")
     _ensure_column(conn, "questions", "answer_status", "TEXT DEFAULT 'draft'")
@@ -101,6 +150,23 @@ def init_db():
     _ensure_column(conn, "meetings", "transcript_text", "TEXT")
     _ensure_column(conn, "meetings", "agenda_file_path", "TEXT")
     _ensure_column(conn, "meetings", "transcript_file_path", "TEXT")
+    _ensure_column(conn, "meetings", "processing_state", "TEXT DEFAULT 'pending'")
+    _ensure_column(conn, "meetings", "processing_started_at", "TEXT")
+    _ensure_column(conn, "meetings", "processing_completed_at", "TEXT")
+    _ensure_column(conn, "meetings", "processing_error", "TEXT")
+    _ensure_column(conn, "meetings", "total_questions", "INTEGER DEFAULT 0")
+    _ensure_column(conn, "meetings", "processed_questions", "INTEGER DEFAULT 0")
+
+    _ensure_column(conn, "questions", "processing_state", "TEXT DEFAULT 'pending'")
+    _ensure_column(conn, "questions", "processing_started_at", "TEXT")
+    _ensure_column(conn, "questions", "processing_completed_at", "TEXT")
+    _ensure_column(conn, "questions", "processing_error", "TEXT")
+    _ensure_column(conn, "questions", "processing_attempts", "INTEGER DEFAULT 0")
+    _ensure_column(conn, "questions", "source_question_idx", "INTEGER")
+    _ensure_column(conn, "questions", "group_root_question_id", "INTEGER")
+    _ensure_column(conn, "questions", "group_label", "TEXT")
+    _ensure_column(conn, "question_followups", "status", "TEXT DEFAULT 'proposed'")
+    _ensure_column(conn, "question_followups", "source", "TEXT")
 
     conn.commit()
     conn.close()
@@ -141,6 +207,32 @@ def list_councillors(conn):
            ORDER BY family_name, given_name"""
     )
     return [dict(row) for row in cur.fetchall()]
+
+
+def list_taxonomy(conn):
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT id, label, parent_id, priority,
+                  COALESCE(synonyms_json, '[]') AS synonyms_json
+           FROM topics_taxonomy
+           ORDER BY priority DESC, LOWER(label)"""
+    )
+    items = []
+    for row in cur.fetchall():
+        try:
+            synonyms = json.loads(row["synonyms_json"])
+        except Exception:
+            synonyms = []
+        items.append(
+            {
+                "id": row["id"],
+                "label": row["label"],
+                "parent_id": row["parent_id"],
+                "priority": row["priority"],
+                "synonyms": synonyms,
+            }
+        )
+    return items
 
 
 if __name__ == "__main__":

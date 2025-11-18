@@ -6,16 +6,20 @@ import sqlite3
 from pathlib import Path
 from uuid import uuid4
 import tempfile
+import threading
+import queue
+from difflib import SequenceMatcher
 
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from db import get_db, init_db, upsert_councillor, list_councillors
+from db import get_db, init_db, upsert_councillor, list_councillors, list_taxonomy
 from xml_utils import parse_agenda_xml
 from ai_utils import align_questions_with_vtt
 
 from docx import Document
+from typing import Optional, List, Dict
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -38,6 +42,447 @@ def _default_storage_dir() -> Path:
 
 storage_dir = Path(os.environ.get("QUEST_STORAGE_DIR", _default_storage_dir()))
 storage_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _now_iso() -> str:
+    return datetime.utcnow().isoformat()
+
+
+def _resolve_source_question(meeting_data: Dict, question_data: Dict) -> Dict:
+    """Zoek de oorspronkelijke vraag uit de opgeslagen XML."""
+    raw_source = meeting_data.get("source_questions_json") or ""
+    parsed_source = []
+    if raw_source:
+        try:
+            parsed_source = json.loads(raw_source)
+        except json.JSONDecodeError:
+            parsed_source = []
+    candidate = None
+    idx = question_data.get("source_question_idx")
+    if isinstance(idx, int) and 0 <= idx < len(parsed_source):
+        candidate = parsed_source[idx]
+    if not candidate:
+        dossier = (question_data.get("dossier_id") or "").strip()
+        seq = (question_data.get("sequence_nr") or "").strip()
+        for item in parsed_source:
+            if dossier and (item.get("dossier_id") or "").strip() == dossier:
+                candidate = item
+                break
+            if not dossier and seq and (item.get("sequence_nr") or "").strip() == seq:
+                candidate = item
+                break
+    if not candidate:
+        candidate = {
+            "meeting_date": meeting_data.get("meeting_date"),
+            "commission_name": meeting_data.get("commission_name"),
+            "dossier_id": question_data.get("dossier_id"),
+            "dossier_year_nr": question_data.get("dossier_year_nr"),
+            "sequence_nr": question_data.get("sequence_nr"),
+            "title": question_data.get("title"),
+            "subject": question_data.get("subject"),
+            "roi_type": question_data.get("roi_type"),
+            "submitter_given_name": question_data.get("submitter_given_name"),
+            "submitter_family_name": question_data.get("submitter_family_name"),
+            "submitter_faction": question_data.get("submitter_faction"),
+            "assignee_label": question_data.get("assignee_label"),
+            "assignee_given_name": question_data.get("assignee_given_name"),
+            "assignee_family_name": question_data.get("assignee_family_name"),
+            "question_text_from_xml": "",
+        }
+    candidate = dict(candidate)
+    candidate.setdefault("meeting_date", meeting_data.get("meeting_date"))
+    candidate.setdefault("commission_name", meeting_data.get("commission_name"))
+    question_text = (
+        candidate.get("question_text_from_xml")
+        or question_data.get("question_text_xml")
+        or question_data.get("question_text_raw")
+        or ""
+    )
+    candidate["question_text_from_xml"] = question_text
+    return candidate
+
+
+def _update_meeting_processing_summary(meeting_id: int, manual_error: str = "") -> Dict:
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT processing_state, COUNT(*) AS amount
+        FROM questions
+        WHERE meeting_id = ?
+        GROUP BY processing_state
+        """,
+        (meeting_id,),
+    )
+    counts = {row["processing_state"] or "": row["amount"] for row in cur.fetchall()}
+    total = sum(counts.values())
+    completed = counts.get("completed", 0)
+    queued = counts.get("queued", 0) + counts.get("pending", 0)
+    running = counts.get("in_progress", 0)
+    errors = counts.get("error", 0)
+    if total == 0:
+        state = "completed"
+    elif queued or running:
+        state = "processing"
+    elif errors:
+        state = "error"
+    else:
+        state = "completed"
+    message = manual_error or (
+        f"{errors} vraag{'en' if errors != 1 else ''} met fout."
+        if errors
+        else ""
+    )
+    complete_ts = _now_iso()
+    cur.execute(
+        """
+        UPDATE meetings
+        SET processed_questions = ?,
+            total_questions = ?,
+            processing_state = ?,
+            processing_completed_at = CASE WHEN ? = 'completed' THEN ? ELSE processing_completed_at END,
+            processing_error = ?
+        WHERE id = ?
+        """,
+        (completed, total, state, state, complete_ts, message, meeting_id),
+    )
+    conn.commit()
+    conn.close()
+    return {
+        "state": state,
+        "total": total,
+        "completed": completed,
+        "queued": queued,
+        "running": running,
+        "errors": errors,
+        "message": message,
+    }
+
+
+class QuestionProcessingQueue:
+    def __init__(self):
+        self._queue: "queue.Queue[Optional[int]]" = queue.Queue()
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._worker, name="question-processor", daemon=True)
+        self._started = False
+
+    def start(self):
+        if self._started:
+            return
+        self._started = True
+        self._restore_pending_jobs()
+        self._thread.start()
+        logger.info("QuestionProcessingQueue started (pending items restored).")
+
+    def stop(self):
+        self._stop_event.set()
+        self._queue.put(None)
+        if self._thread.is_alive():
+            self._thread.join(timeout=5)
+        logger.info("QuestionProcessingQueue stopped.")
+
+    def _restore_pending_jobs(self):
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id
+            FROM questions
+            WHERE processing_state IN ('pending', 'queued', 'in_progress')
+            ORDER BY id
+            """
+        )
+        ids = [row["id"] for row in cur.fetchall()]
+        for question_id in ids:
+            self._queue.put(question_id)
+        conn.close()
+        if ids:
+            logger.info("Restored %d vragen naar de queue na herstart.", len(ids))
+
+    def enqueue_meeting(self, meeting_id: int):
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id
+            FROM questions
+            WHERE meeting_id = ?
+              AND processing_state IN ('pending', 'error')
+            ORDER BY id
+            """,
+            (meeting_id,),
+        )
+        ids = [row["id"] for row in cur.fetchall()]
+        if ids:
+            cur.executemany(
+                "UPDATE questions SET processing_state = 'queued', processing_error = '' WHERE id = ?",
+                [(qid,) for qid in ids],
+            )
+        cur.execute(
+            """
+            UPDATE meetings
+            SET processing_state = CASE
+                    WHEN total_questions > 0 THEN 'queued'
+                    ELSE processing_state
+                END,
+                processing_started_at = CASE
+                    WHEN processing_started_at IS NULL AND total_questions > 0 THEN ?
+                    ELSE processing_started_at
+                END
+            WHERE id = ?
+            """,
+            (_now_iso(), meeting_id),
+        )
+        conn.commit()
+        conn.close()
+        for question_id in ids:
+            self._queue.put(question_id)
+
+    def enqueue_question(self, question_id: int):
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE questions SET processing_state = 'queued', processing_error = '' WHERE id = ?",
+            (question_id,),
+        )
+        conn.commit()
+        conn.close()
+        self._queue.put(question_id)
+
+    def stats(self) -> Dict:
+        return {"queued_in_memory": self._queue.qsize()}
+
+    def _worker(self):
+        while not self._stop_event.is_set():
+            try:
+                question_id = self._queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            if question_id is None:
+                break
+            try:
+                self._process_question(question_id)
+            except Exception:
+                logger.exception("Onverwachte fout tijdens verwerken van vraag %s", question_id)
+            finally:
+                self._queue.task_done()
+
+    def _process_question(self, question_id: int):
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM questions WHERE id = ?", (question_id,))
+        question = cur.fetchone()
+        if not question:
+            conn.close()
+            return
+        if (question["processing_state"] or "").lower() == "completed":
+            conn.close()
+            return
+        cur.execute("SELECT * FROM meetings WHERE id = ?", (question["meeting_id"],))
+        meeting = cur.fetchone()
+        if not meeting:
+            conn.close()
+            return
+        group_root_id = question["group_root_question_id"]
+        root_question = None
+        if group_root_id:
+            cur.execute("SELECT * FROM questions WHERE id = ?", (group_root_id,))
+            root_question = cur.fetchone()
+            if not root_question or root_question["meeting_id"] != meeting["id"]:
+                cur.execute(
+                    "UPDATE questions SET group_root_question_id = NULL WHERE id = ?",
+                    (question_id,),
+                )
+                conn.commit()
+                group_root_id = None
+                root_question = None
+            else:
+                root_state = (root_question["processing_state"] or "").lower()
+                if root_state != "completed":
+                    cur.execute(
+                        "UPDATE questions SET processing_state = 'queued' WHERE id = ?",
+                        (question_id,),
+                    )
+                    conn.commit()
+                    conn.close()
+                    self._queue.put(question_id)
+                    return
+        start_ts = _now_iso()
+        cur.execute(
+            """
+            UPDATE questions
+            SET processing_state = 'in_progress',
+                processing_started_at = COALESCE(processing_started_at, ?),
+                processing_error = ''
+            WHERE id = ?
+            """,
+            (start_ts, question_id),
+        )
+        cur.execute(
+            """
+            UPDATE meetings
+            SET processing_state = 'processing',
+                processing_started_at = COALESCE(processing_started_at, ?)
+            WHERE id = ?
+            """,
+            (start_ts, meeting["id"]),
+        )
+        conn.commit()
+        councillors = list_councillors(conn)
+        taxonomy_items = list_taxonomy(conn)
+        taxonomy_lookup = _build_taxonomy_lookup(taxonomy_items)
+        cur.execute(
+            "SELECT id, dossier_id, sequence_nr FROM questions WHERE meeting_id = ?",
+            (meeting["id"],),
+        )
+        meeting_question_rows = cur.fetchall()
+        question_mapping = _question_index_map(meeting_question_rows)
+        question_lookup_by_id = {row["id"]: row for row in meeting_question_rows}
+        meeting_data = dict(meeting)
+        question_data = dict(question)
+        root_data = dict(root_question) if root_question else None
+        transcript_text = meeting_data.get("transcript_text") or ""
+        conn.close()
+
+        if not transcript_text.strip():
+            self._mark_question_error(question_id, meeting_data["id"], "Geen transcript beschikbaar voor deze vergadering.")
+            return
+
+        source_question = _resolve_source_question(meeting_data, question_data)
+        try:
+            ai_items = align_questions_with_vtt(
+                [source_question], transcript_text, councillors, taxonomy_items
+            )
+        except Exception as exc:
+            self._mark_question_error(question_id, meeting_data["id"], str(exc))
+            return
+
+        if not ai_items:
+            self._mark_question_error(question_id, meeting_data["id"], "Geen AI-resultaat ontvangen.")
+            return
+
+        item = ai_items[0]
+        if question_data.get("group_root_question_id") and root_data:
+            target_label = root_data.get("sequence_nr") or root_data.get("subject") or root_data.get("title") or f"#{root_data.get('id')}"
+            reference_text = (question_data.get("group_label") or "").strip()
+            if not reference_text:
+                reference_text = f"Het antwoord werd gegeven bij vraag {target_label}."
+            if not reference_text.endswith("."):
+                reference_text += "."
+            item["answer_text_raw"] = reference_text
+            item["answer_text_verbatim"] = reference_text
+            item["summary"] = reference_text
+            extra_note = f"Gekoppeld aan vraag {target_label}."
+            existing_note = (item.get("note") or "").strip()
+            item["note"] = f"{existing_note} {extra_note}".strip()
+        item.setdefault("answer_text_verbatim", item.get("answer_text_raw", ""))
+        item.setdefault("answer_text_raw", "")
+        item.setdefault("answer_status", "draft")
+        normalized_topics = _normalize_topics(item.get("topics"), taxonomy_lookup)
+        suggested_root_id = _resolve_related_target(item.get("related_question_keys"), question_mapping)
+        group_label_value = (question_data.get("group_label") or "").strip()
+        if not question_data.get("group_root_question_id") and suggested_root_id and suggested_root_id != question_id:
+            target_seq = question_lookup_by_id.get(suggested_root_id, {}).get("sequence_nr") or suggested_root_id
+            group_label_value = group_label_value or f"Zie antwoord bij vraag {target_seq} (AI-voorstel)."
+            question_data["group_root_question_id"] = suggested_root_id
+            question_data["group_label"] = group_label_value
+        finish_ts = _now_iso()
+        finish_ts = _now_iso()
+
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE questions
+            SET
+                question_start_time = ?,
+                question_end_time = ?,
+                answer_start_time = ?,
+                answer_end_time = ?,
+                question_text_raw = ?,
+                answer_text_verbatim = ?,
+                answer_text_raw = ?,
+                summary = ?,
+                actions_json = ?,
+                topics_json = ?,
+                note = ?,
+                answer_status = ?,
+                processing_state = 'completed',
+                processing_completed_at = ?,
+                processing_error = '',
+                processing_attempts = processing_attempts + 1
+            WHERE id = ?
+            """,
+            (
+                item.get("question_start_time") or "",
+                item.get("question_end_time") or "",
+                item.get("answer_start_time") or "",
+                item.get("answer_end_time") or "",
+                item.get("question_text_raw") or question_data.get("question_text_raw") or "",
+                item.get("answer_text_verbatim") or "",
+                item.get("answer_text_raw") or "",
+                item.get("summary") or "",
+                json.dumps(item.get("actions") or [], ensure_ascii=False),
+                json.dumps(normalized_topics or item.get("topics") or [], ensure_ascii=False),
+                item.get("note") or "",
+                item.get("answer_status") or "draft",
+                finish_ts,
+                question_id,
+            ),
+        )
+        if question_data.get("group_root_question_id") and group_label_value:
+            cur.execute(
+                """
+                UPDATE questions
+                SET group_root_question_id = ?,
+                    group_label = CASE
+                        WHEN COALESCE(TRIM(group_label), '') = '' THEN ?
+                        ELSE group_label
+                    END
+                WHERE id = ?
+                """,
+                (
+                    question_data["group_root_question_id"],
+                    group_label_value,
+                    question_id,
+                ),
+            )
+        _replace_auto_followups(cur, question_id, item.get("followups"), source="ai")
+        conn.commit()
+        conn.close()
+        _update_meeting_processing_summary(meeting_data["id"])
+
+    def _mark_question_error(self, question_id: int, meeting_id: int, message: str):
+        truncated = (message or "")[:500]
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE questions
+            SET processing_state = 'error',
+                processing_error = ?,
+                processing_completed_at = NULL,
+                processing_attempts = processing_attempts + 1
+            WHERE id = ?
+            """,
+            (truncated, question_id),
+        )
+        conn.commit()
+        conn.close()
+        _update_meeting_processing_summary(meeting_id, manual_error=truncated)
+
+
+processing_queue: Optional[QuestionProcessingQueue] = None
+
+
+def _enqueue_meeting_processing(meeting_id: int):
+    if processing_queue:
+        processing_queue.enqueue_meeting(meeting_id)
+
+
+def _enqueue_question_processing(question_id: int):
+    if processing_queue:
+        processing_queue.enqueue_question(question_id)
 
 
 def _coerce_list(value):
@@ -92,6 +537,14 @@ QUESTION_INSERT_COLUMNS = [
     "topics_json",
     "note",
     "answer_status",
+    "processing_state",
+    "processing_error",
+    "processing_started_at",
+    "processing_completed_at",
+    "processing_attempts",
+    "source_question_idx",
+    "group_root_question_id",
+    "group_label",
 ]
 
 QUESTION_INSERT_SQL = (
@@ -103,9 +556,173 @@ QUESTION_INSERT_SQL = (
 )
 
 
+def _build_taxonomy_lookup(items: List[dict]) -> Dict[str, str]:
+    lookup = {}
+    for item in items or []:
+        label = (item.get("label") or "").strip()
+        if not label:
+            continue
+        lookup[label.lower()] = label
+        for syn in item.get("synonyms") or []:
+            syn_label = (syn or "").strip()
+            if syn_label:
+                lookup[syn_label.lower()] = label
+    lookup.setdefault("overig", "Overig")
+    return lookup
+
+
+def _normalize_topics(topics: Optional[List[str]], lookup: Dict[str, str]) -> List[str]:
+    normalized = []
+    for topic in topics or []:
+        topic_str = (topic or "").strip()
+        if not topic_str:
+            continue
+        canonical = lookup.get(topic_str.lower())
+        if canonical and canonical not in normalized:
+            normalized.append(canonical)
+    if not normalized and lookup.get("overig"):
+        normalized.append(lookup["overig"])
+    return normalized
+
+
+def _question_index_map(rows: List[sqlite3.Row]) -> Dict[str, int]:
+    mapping = {}
+    for row in rows:
+        qid = row["id"]
+        dossier = (row["dossier_id"] or "").strip().lower()
+        seq = (row["sequence_nr"] or "").strip().lower()
+        if dossier:
+            mapping[dossier] = qid
+        if seq:
+            mapping[seq] = qid
+            mapping[f"seq:{seq}"] = qid
+    return mapping
+
+
+def _resolve_related_target(related_keys: List[str], mapping: Dict[str, int]) -> Optional[int]:
+    for key in related_keys or []:
+        token = (key or "").strip().lower()
+        if not token:
+            continue
+        if token in mapping:
+            return mapping[token]
+        seq_key = f"seq:{token}"
+        if seq_key in mapping:
+            return mapping[seq_key]
+    return None
+
+
+def _replace_auto_followups(cur, question_id: int, followups: List[dict], source: str = "ai"):
+    if followups is None:
+        return
+    cur.execute(
+        "DELETE FROM question_followups WHERE question_id = ? AND source = ?",
+        (question_id, source),
+    )
+    for item in followups:
+        if not isinstance(item, dict):
+            continue
+        cur.execute(
+            """
+            INSERT INTO question_followups (
+                question_id,
+                speaker_given_name,
+                speaker_family_name,
+                speaker_faction,
+                type,
+                note,
+                text,
+                start_time,
+                end_time,
+                status,
+                source,
+                updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                question_id,
+                (item.get("speaker_given_name") or "").strip(),
+                (item.get("speaker_family_name") or "").strip(),
+                (item.get("speaker_faction") or "").strip(),
+                (item.get("type") or "followup").strip() or "followup",
+                (item.get("note") or "").strip(),
+                (item.get("text") or "").strip(),
+                (item.get("start_time") or "").strip(),
+                (item.get("end_time") or "").strip(),
+                "proposed",
+                source,
+                _now_iso(),
+            ),
+        )
+
+
+def _auto_group_similar_questions(meeting_id: int, threshold: float = 0.88):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, sequence_nr, question_text_xml, question_text_raw, group_root_question_id
+        FROM questions
+        WHERE meeting_id = ?
+        ORDER BY CAST(sequence_nr AS INTEGER)
+        """,
+        (meeting_id,),
+    )
+    rows = cur.fetchall()
+    for idx, row in enumerate(rows):
+        if row["group_root_question_id"]:
+            continue
+        text = (row["question_text_xml"] or row["question_text_raw"] or "").strip()
+        if not text:
+            continue
+        for prev in rows[:idx]:
+            prev_text = (prev["question_text_xml"] or prev["question_text_raw"] or "").strip()
+            if not prev_text:
+                continue
+            ratio = SequenceMatcher(None, text, prev_text).ratio()
+            if ratio >= threshold:
+                label = f"Zie antwoord bij vraag {prev['sequence_nr'] or prev['id']} (automatisch)."
+                cur.execute(
+                    """
+                    UPDATE questions
+                    SET group_root_question_id = COALESCE(group_root_question_id, ?),
+                        group_label = CASE
+                            WHEN COALESCE(TRIM(group_label), '') = '' THEN ?
+                            ELSE group_label
+                        END
+                    WHERE id = ? AND (group_root_question_id IS NULL OR group_root_question_id = id)
+                    """,
+                    (prev["id"], label, row["id"]),
+                )
+                break
+    conn.commit()
+    conn.close()
+
+
+def _serialize_synonyms(values: Optional[List[str]]) -> str:
+    cleaned = []
+    for val in values or []:
+        if val is None:
+            continue
+        text = str(val).strip()
+        if text:
+            cleaned.append(text)
+    return json.dumps(cleaned, ensure_ascii=False)
+
+
 @app.on_event("startup")
 def startup_event():
+    global processing_queue
     init_db()
+    if processing_queue is None:
+        processing_queue = QuestionProcessingQueue()
+    processing_queue.start()
+
+
+@app.on_event("shutdown")
+def shutdown_event():
+    if processing_queue:
+        processing_queue.stop()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -202,42 +819,18 @@ async def upload(
         meeting_date,
         commission_name,
     )
-    councillors = list_councillors(conn)
-    logger.info("Calling OpenAI alignment for %d questions", len(oral_questions))
-    ai_items = align_questions_with_vtt(oral_questions, vtt_str, councillors)
-    items_by_id = {}
-    for idx, item in enumerate(ai_items):
-        key = item.get("dossier_id") or item.get("id") or f"idx-{idx}"
-        if key:
-            items_by_id[key] = item
-
-    items = []
-    for idx, original in enumerate(oral_questions):
-        key = original.get("dossier_id") or f"idx-{idx}"
-        item = items_by_id.get(key)
-        if not item:
-            item = {
-                **original,
-                "question_start_time": "",
-                "question_end_time": "",
-                "answer_start_time": "",
-                "answer_end_time": "",
-                "question_text_raw": original.get("question_text_from_xml", ""),
-                "answer_text_verbatim": "",
-                "answer_text_raw": "",
-                "summary": "",
-                "actions": [],
-                "topics": [],
-                "answer_status": "draft",
-                "note": "Automatisch toegevoegd: geen AI-resultaat beschikbaar.",
-            }
-        items.append(item)
-    logger.info("OpenAI returned %d aligned items", len(items))
 
     cur = conn.cursor()
-
+    processing_started_at = _now_iso()
+    initial_state = "queued" if oral_questions else "completed"
     cur.execute(
-        "INSERT INTO meetings (meeting_date, commission_name, webcast_id, source_questions_json, transcript_text, agenda_file_path, transcript_file_path) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        """INSERT INTO meetings (
+            meeting_date, commission_name, webcast_id,
+            source_questions_json, transcript_text,
+            agenda_file_path, transcript_file_path,
+            processing_state, processing_started_at,
+            total_questions, processed_questions, processing_error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             meeting_date,
             commission_name,
@@ -246,12 +839,18 @@ async def upload(
             vtt_str,
             str(agenda_path),
             str(transcript_path),
+            initial_state,
+            processing_started_at if oral_questions else None,
+            len(oral_questions),
+            0,
+            "",
         ),
     )
     meeting_id = cur.lastrowid
     logger.info("Stored meeting id=%s", meeting_id)
 
-    for idx, q in enumerate(items):
+    for idx, q in enumerate(oral_questions):
+        key = q.get("dossier_id") or f"idx-{idx}"
         cur.execute(
             QUESTION_INSERT_SQL,
             (
@@ -268,41 +867,50 @@ async def upload(
                 q.get("assignee_label"),
                 q.get("assignee_given_name"),
                 q.get("assignee_family_name"),
-                q.get("question_start_time"),
-                q.get("question_end_time"),
-                q.get("answer_start_time"),
-                q.get("answer_end_time"),
                 "",
                 "",
-                q.get("question_text_raw"),
-                q.get("answer_text_verbatim", q.get("answer_text_raw", "")),
-                q.get("answer_text_raw"),
-                question_lookup.get(
-                    q.get("dossier_id"),
-                    question_lookup.get(f"idx-{idx}", {}),
-                ).get("question_text_from_xml", ""),
-                q.get("summary"),
-                json.dumps(q.get("actions", []), ensure_ascii=False),
-                json.dumps(q.get("topics", []), ensure_ascii=False),
-                q.get("note", ""),
-                (q.get("answer_status") or "draft"),
+                "",
+                "",
+                "",
+                "",
+                q.get("question_text_from_xml", ""),
+                "",
+                "",
+                q.get("question_text_from_xml", ""),
+                "",
+                json.dumps([], ensure_ascii=False),
+                json.dumps([], ensure_ascii=False),
+                "Ingeladen vanuit XML, wacht op verwerking.",
+                "draft",
+                "pending",
+                "",
+                None,
+                None,
+                0,
+                idx,
+                None,
+                "",
             ),
         )
         logger.info(
-            "Stored question sequence_nr=%s (db id=%s)",
+            "Stored placeholder for question sequence_nr=%s (db id=%s)",
             q.get("sequence_nr"),
             cur.lastrowid,
         )
 
     conn.commit()
     conn.close()
-    logger.info(
-        "Upload finished meeting_id=%s questions=%d",
-        meeting_id,
-        len(items),
-    )
+    _auto_group_similar_questions(meeting_id)
 
-    return {"status": "ok", "meeting_id": meeting_id, "questions": len(items)}
+    if oral_questions:
+        _enqueue_meeting_processing(meeting_id)
+
+    final_status = "completed" if not oral_questions else "queued"
+    return {
+        "status": final_status,
+        "meeting_id": meeting_id,
+        "questions": len(oral_questions),
+    }
 
 
 @app.get("/api/meetings/{meeting_id}")
@@ -328,14 +936,36 @@ def get_meeting(meeting_id: int):
         """,
         (meeting_id,),
     )
-    questions = [_deserialize_question_row(row) for row in cur.fetchall()]
+    question_rows = cur.fetchall()
+    question_ids = [row["id"] for row in question_rows]
+    followups_map = {}
+    if question_ids:
+        placeholders = ",".join(["?"] * len(question_ids))
+        cur.execute(
+            f"""
+            SELECT *
+            FROM question_followups
+            WHERE question_id IN ({placeholders})
+            ORDER BY
+                CASE WHEN start_time IS NULL OR start_time = '' THEN 1 ELSE 0 END,
+                start_time,
+                id
+            """,
+            question_ids,
+        )
+        for row in cur.fetchall():
+            followups_map.setdefault(row["question_id"], []).append(dict(row))
+    questions = []
+    for row in question_rows:
+        item = _deserialize_question_row(row)
+        item["followups"] = followups_map.get(row["id"], [])
+        questions.append(item)
     conn.close()
 
     return {"meeting": dict(meeting), "questions": questions}
 
 
 from pydantic import BaseModel
-from typing import Optional, List
 
 
 class QuestionCreate(BaseModel):
@@ -376,6 +1006,47 @@ class QuestionUpdate(BaseModel):
     topics: Optional[List[str]] = None
 
 
+class QuestionGroupUpdate(BaseModel):
+    group_root_question_id: Optional[int] = None
+    group_label: Optional[str] = None
+
+
+class FollowupCreate(BaseModel):
+    speaker_given_name: Optional[str] = ""
+    speaker_family_name: Optional[str] = ""
+    speaker_faction: Optional[str] = ""
+    type: Optional[str] = "followup"
+    note: Optional[str] = ""
+    text: Optional[str] = ""
+    start_time: Optional[str] = ""
+    end_time: Optional[str] = ""
+
+
+class FollowupUpdate(BaseModel):
+    speaker_given_name: Optional[str] = None
+    speaker_family_name: Optional[str] = None
+    speaker_faction: Optional[str] = None
+    type: Optional[str] = None
+    note: Optional[str] = None
+    text: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+
+
+class TaxonomyCreate(BaseModel):
+    label: str
+    parent_id: Optional[int] = None
+    priority: int = 0
+    synonyms: Optional[List[str]] = []
+
+
+class TaxonomyUpdate(BaseModel):
+    label: Optional[str] = None
+    parent_id: Optional[int] = None
+    priority: Optional[int] = None
+    synonyms: Optional[List[str]] = None
+
+
 @app.post("/api/questions", status_code=201)
 async def create_question(payload: QuestionCreate):
     conn = get_db()
@@ -400,6 +1071,7 @@ async def create_question(payload: QuestionCreate):
                 max_seq = num
         sequence_nr = str(max_seq + 1)
 
+    now_ts = datetime.utcnow().isoformat()
     cur.execute(
         QUESTION_INSERT_SQL,
         (
@@ -431,6 +1103,14 @@ async def create_question(payload: QuestionCreate):
             json.dumps([], ensure_ascii=False),
             "Handmatig toegevoegd via interface.",
             "draft",
+            "completed",
+            "",
+            now_ts,
+            now_ts,
+            0,
+            None,
+            None,
+            "",
         ),
     )
     question_id = cur.lastrowid
@@ -438,6 +1118,7 @@ async def create_question(payload: QuestionCreate):
     cur.execute("SELECT * FROM questions WHERE id = ?", (question_id,))
     question = cur.fetchone()
     conn.close()
+    _update_meeting_processing_summary(payload.meeting_id)
     return {"status": "created", "question": _deserialize_question_row(question)}
 
 
@@ -503,15 +1184,162 @@ async def update_question(question_id: int, payload: QuestionUpdate):
 def delete_question(question_id: int):
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT id FROM questions WHERE id = ?", (question_id,))
-    if not cur.fetchone():
+    cur.execute("SELECT meeting_id FROM questions WHERE id = ?", (question_id,))
+    row = cur.fetchone()
+    if not row:
         conn.close()
         return JSONResponse({"error": "question not found"}, status_code=404)
 
     cur.execute("DELETE FROM questions WHERE id = ?", (question_id,))
     conn.commit()
     conn.close()
+    _update_meeting_processing_summary(row["meeting_id"])
     return {"status": "deleted", "question_id": question_id}
+
+
+@app.post("/api/questions/{question_id}/group")
+def update_question_grouping(question_id: int, payload: QuestionGroupUpdate):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT meeting_id FROM questions WHERE id = ?", (question_id,))
+    question = cur.fetchone()
+    if not question:
+        conn.close()
+        return JSONResponse({"error": "question not found"}, status_code=404)
+
+    root_id = payload.group_root_question_id
+    label = (payload.group_label or "").strip()
+    meeting_id = question["meeting_id"]
+
+    if root_id:
+        if root_id == question_id:
+            conn.close()
+            return JSONResponse({"error": "Een vraag kan niet naar zichzelf verwijzen."}, status_code=400)
+        cur.execute(
+            "SELECT id FROM questions WHERE id = ? AND meeting_id = ?",
+            (root_id, meeting_id),
+        )
+        root_question = cur.fetchone()
+        if not root_question:
+            conn.close()
+            return JSONResponse({"error": "Doelvraag bestaat niet binnen dezelfde vergadering."}, status_code=400)
+    cur.execute(
+        """
+        UPDATE questions
+        SET
+            group_root_question_id = ?,
+            group_label = ?,
+            processing_state = 'pending',
+            processing_started_at = NULL,
+            processing_completed_at = NULL,
+            processing_error = ''
+        WHERE id = ?
+        """,
+        (root_id, label, question_id),
+    )
+    conn.commit()
+    cur.execute("SELECT * FROM questions WHERE id = ?", (question_id,))
+    updated = cur.fetchone()
+    conn.close()
+    _update_meeting_processing_summary(meeting_id)
+    _enqueue_question_processing(question_id)
+    return {"status": "queued", "question": _deserialize_question_row(updated)}
+
+
+@app.post("/api/questions/{question_id}/followups", status_code=201)
+def create_followup(question_id: int, payload: FollowupCreate):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM questions WHERE id = ?", (question_id,))
+    question = cur.fetchone()
+    if not question:
+        conn.close()
+        return JSONResponse({"error": "question not found"}, status_code=404)
+
+    cur.execute(
+        """
+        INSERT INTO question_followups (
+            question_id,
+            speaker_given_name,
+            speaker_family_name,
+            speaker_faction,
+            type,
+            note,
+            text,
+            start_time,
+            end_time,
+            status,
+            source,
+            updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            question_id,
+            (payload.speaker_given_name or "").strip(),
+            (payload.speaker_family_name or "").strip(),
+            (payload.speaker_faction or "").strip(),
+            (payload.type or "followup").strip() or "followup",
+            (payload.note or "").strip(),
+            (payload.text or "").strip(),
+            (payload.start_time or "").strip(),
+            (payload.end_time or "").strip(),
+            "confirmed",
+            "manual",
+            _now_iso(),
+        ),
+    )
+    followup_id = cur.lastrowid
+    conn.commit()
+    cur.execute("SELECT * FROM question_followups WHERE id = ?", (followup_id,))
+    followup = dict(cur.fetchone())
+    conn.close()
+    return {"status": "created", "followup": followup}
+
+
+@app.patch("/api/followups/{followup_id}")
+def update_followup(followup_id: int, payload: FollowupUpdate):
+    data = payload.model_dump(exclude_unset=True)
+    if not data:
+        return {"status": "no changes"}
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM question_followups WHERE id = ?", (followup_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return JSONResponse({"error": "followup not found"}, status_code=404)
+    fields = []
+    values = []
+    for key, value in data.items():
+        fields.append(f"{key} = ?")
+        values.append((value or "").strip())
+    fields.append("updated_at = ?")
+    values.append(_now_iso())
+    values.append(followup_id)
+    cur.execute(
+        f"UPDATE question_followups SET {', '.join(fields)} WHERE id = ?",
+        values,
+    )
+    conn.commit()
+    cur.execute("SELECT * FROM question_followups WHERE id = ?", (followup_id,))
+    updated = dict(cur.fetchone())
+    conn.close()
+    return {"status": "ok", "followup": updated}
+
+
+@app.delete("/api/followups/{followup_id}")
+def delete_followup(followup_id: int):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM question_followups WHERE id = ?", (followup_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return JSONResponse({"error": "followup not found"}, status_code=404)
+    cur.execute("DELETE FROM question_followups WHERE id = ?", (followup_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "deleted", "followup_id": followup_id}
 
 
 @app.post("/api/questions/{question_id}/regenerate")
@@ -534,99 +1362,30 @@ async def regenerate_question(question_id: int):
     if not transcript_text:
         conn.close()
         return JSONResponse(
-            {"error": "Voor deze vergadering is geen transcript opgeslagen. Upload de vergadering opnieuw om dit mogelijk te maken."},
+            {
+                "error": "Voor deze vergadering is geen transcript opgeslagen. Upload de vergadering opnieuw om dit mogelijk te maken."
+            },
             status_code=400,
         )
-
-    source_question = None
-    raw_source = meeting["source_questions_json"] or ""
-    if raw_source:
-        try:
-            parsed_source = json.loads(raw_source)
-        except json.JSONDecodeError:
-            parsed_source = []
-        dossier = (question["dossier_id"] or "").strip()
-        seq = (question["sequence_nr"] or "").strip()
-        for item in parsed_source:
-            if dossier and (item.get("dossier_id") or "").strip() == dossier:
-                source_question = item
-                break
-            if not dossier and seq and (item.get("sequence_nr") or "").strip() == seq:
-                source_question = item
-                break
-
-    if not source_question:
-        source_question = {
-            "meeting_date": meeting["meeting_date"],
-            "commission_name": meeting["commission_name"],
-            "dossier_id": question["dossier_id"],
-            "dossier_year_nr": question["dossier_year_nr"],
-            "sequence_nr": question["sequence_nr"],
-            "title": question["title"],
-            "subject": question["subject"],
-            "roi_type": question["roi_type"],
-            "submitter_given_name": question["submitter_given_name"],
-            "submitter_family_name": question["submitter_family_name"],
-            "submitter_faction": question["submitter_faction"],
-            "assignee_label": question["assignee_label"],
-            "assignee_given_name": question["assignee_given_name"],
-            "assignee_family_name": question["assignee_family_name"],
-            "question_text_from_xml": question["question_text_xml"]
-            or question["question_text_raw"]
-            or "",
-        }
-
-    councillors = list_councillors(conn)
-    ai_items = align_questions_with_vtt([source_question], transcript_text, councillors)
-    if not ai_items:
-        conn.close()
-        return JSONResponse({"error": "AI kon geen antwoord genereren."}, status_code=500)
-
-    item = ai_items[0]
-    item.setdefault("answer_text_verbatim", item.get("answer_text_raw", ""))
-    item.setdefault("answer_text_raw", "")
-    item.setdefault("answer_status", "draft")
 
     cur.execute(
         """
         UPDATE questions
-        SET
-            question_start_time = ?,
-            question_end_time = ?,
-            answer_start_time = ?,
-            answer_end_time = ?,
-            question_text_raw = ?,
-            answer_text_verbatim = ?,
-            answer_text_raw = ?,
-            summary = ?,
-            actions_json = ?,
-            topics_json = ?,
-            note = ?,
-            answer_status = ?
+        SET processing_state = 'pending',
+            processing_error = '',
+            processing_started_at = NULL,
+            processing_completed_at = NULL
         WHERE id = ?
         """,
-        (
-            item.get("question_start_time") or "",
-            item.get("question_end_time") or "",
-            item.get("answer_start_time") or "",
-            item.get("answer_end_time") or "",
-            item.get("question_text_raw") or "",
-            item.get("answer_text_verbatim") or "",
-            item.get("answer_text_raw") or "",
-            item.get("summary") or "",
-            json.dumps(item.get("actions") or [], ensure_ascii=False),
-            json.dumps(item.get("topics") or [], ensure_ascii=False),
-            item.get("note") or "",
-            item.get("answer_status") or "draft",
-            question_id,
-        ),
+        (question_id,),
     )
     conn.commit()
-
     cur.execute("SELECT * FROM questions WHERE id = ?", (question_id,))
     updated = cur.fetchone()
     conn.close()
-    return {"status": "ok", "question": _deserialize_question_row(updated)}
+    _update_meeting_processing_summary(question["meeting_id"])
+    _enqueue_question_processing(question_id)
+    return {"status": "queued", "question": _deserialize_question_row(updated)}
 
 
 @app.get("/export/{meeting_id}")
@@ -666,6 +1425,9 @@ def export_docx(meeting_id: int):
         doc.add_paragraph(f"Bevoegde schepen: {q['assignee_label']}")
         doc.add_paragraph("\nVraag:")
         doc.add_paragraph(q['question_text_raw'] or "")
+        if q["group_root_question_id"]:
+            ref = q["group_label"] or f"Zie antwoord bij vraag {q['group_root_question_id']}."
+            doc.add_paragraph(f"Koppeling: {ref}")
         doc.add_paragraph("\nAntwoord (quasi letterlijke versie):")
         doc.add_paragraph(q['answer_text_verbatim'] or "")
         doc.add_paragraph("\nAntwoord (gebalde versie):")
@@ -722,39 +1484,50 @@ def restore_missing_questions(meeting_id: int):
     }
 
     added = 0
-    for q in oral_questions:
+    for idx, q in enumerate(oral_questions):
         key = question_key(q)
         if key in existing_ids:
             continue
 
         cur.execute(
-            """INSERT INTO questions (
-                meeting_id,
-                dossier_id, dossier_year_nr, sequence_nr,
-                title, subject, roi_type,
-                submitter_given_name, submitter_family_name, submitter_faction,
-                assignee_label, assignee_given_name, assignee_family_name,
-                question_start_time, question_end_time,
-                answer_start_time, answer_end_time,
-                reply_start_time, reply_end_time,
-                question_text_raw, answer_text_verbatim, answer_text_raw,
-                question_text_xml,
-                summary, actions_json, topics_json, note, answer_status
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            QUESTION_INSERT_SQL,
             (
                 meeting_id,
-                q.get("dossier_id"), q.get("dossier_year_nr"), q.get("sequence_nr"),
-                q.get("title"), q.get("subject"), q.get("roi_type"),
-                q.get("submitter_given_name"), q.get("submitter_family_name"), q.get("submitter_faction"),
-                q.get("assignee_label"), q.get("assignee_given_name"), q.get("assignee_family_name"),
-                "", "", "", "",
-                "", "",
-                q.get("question_text_from_xml", ""), "",
+                q.get("dossier_id"),
+                q.get("dossier_year_nr"),
+                q.get("sequence_nr"),
+                q.get("title"),
+                q.get("subject"),
+                q.get("roi_type"),
+                q.get("submitter_given_name"),
+                q.get("submitter_family_name"),
+                q.get("submitter_faction"),
+                q.get("assignee_label"),
+                q.get("assignee_given_name"),
+                q.get("assignee_family_name"),
+                "",
+                "",
+                "",
+                "",
+                "",
                 "",
                 q.get("question_text_from_xml", ""),
-                "", json.dumps([], ensure_ascii=False), json.dumps([], ensure_ascii=False),
+                "",
+                "",
+                q.get("question_text_from_xml", ""),
+                "",
+                json.dumps([], ensure_ascii=False),
+                json.dumps([], ensure_ascii=False),
                 "Automatisch toegevoegd vanuit bron-XML (geen AI-resultaat).",
                 "draft",
+                "pending",
+                "",
+                None,
+                None,
+                0,
+                idx,
+                None,
+                "",
             ),
         )
         added += 1
@@ -762,6 +1535,10 @@ def restore_missing_questions(meeting_id: int):
 
     conn.commit()
     conn.close()
+    if added:
+        _auto_group_similar_questions(meeting_id)
+        _enqueue_meeting_processing(meeting_id)
+    _update_meeting_processing_summary(meeting_id)
     return {"status": "ok", "added": added}
 
 
@@ -783,12 +1560,215 @@ def list_meetings():
     return {"meetings": meetings}
 
 
+@app.get("/api/processing/meetings/{meeting_id}")
+def get_meeting_processing_status(meeting_id: int):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM meetings WHERE id = ?", (meeting_id,))
+    meeting_exists = cur.fetchone()
+    conn.close()
+    if not meeting_exists:
+        return JSONResponse({"error": "meeting not found"}, status_code=404)
+
+    summary = _update_meeting_processing_summary(meeting_id)
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT processing_state, total_questions, processed_questions, processing_error FROM meetings WHERE id = ?",
+        (meeting_id,),
+    )
+    meeting_row = cur.fetchone()
+    cur.execute(
+        """
+        SELECT processing_state, COUNT(*) AS amount
+        FROM questions
+        WHERE meeting_id = ?
+        GROUP BY processing_state
+        """,
+        (meeting_id,),
+    )
+    states = {row["processing_state"] or "": row["amount"] for row in cur.fetchall()}
+    conn.close()
+    summary.update(
+        {
+            "meeting_id": meeting_id,
+            "processing_state": meeting_row["processing_state"],
+            "processed_questions": meeting_row["processed_questions"],
+            "total_questions": meeting_row["total_questions"],
+            "processing_error": meeting_row["processing_error"],
+            "states": states,
+        }
+    )
+    return summary
+
+
+@app.get("/api/processing/queue")
+def get_queue_status():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            m.id AS meeting_id,
+            m.meeting_date,
+            m.commission_name,
+            SUM(CASE WHEN q.processing_state IN ('pending', 'queued') THEN 1 ELSE 0 END) AS queued_questions,
+            SUM(CASE WHEN q.processing_state = 'in_progress' THEN 1 ELSE 0 END) AS in_progress_questions,
+            SUM(CASE WHEN q.processing_state = 'error' THEN 1 ELSE 0 END) AS error_questions,
+            COUNT(q.id) AS total_questions
+        FROM meetings m
+        JOIN questions q ON q.meeting_id = m.id
+        GROUP BY m.id
+        HAVING
+            queued_questions > 0
+            OR in_progress_questions > 0
+            OR error_questions > 0
+        ORDER BY m.meeting_date DESC, m.id DESC
+        """
+    )
+    meetings = []
+    for row in cur.fetchall():
+        meetings.append(
+            {
+                "meeting_id": row["meeting_id"],
+                "meeting_date": row["meeting_date"],
+                "commission_name": row["commission_name"],
+                "queued": row["queued_questions"],
+                "in_progress": row["in_progress_questions"],
+                "errors": row["error_questions"],
+                "total": row["total_questions"],
+            }
+        )
+    conn.close()
+    queue_snapshot = processing_queue.stats() if processing_queue else {"queued_in_memory": 0}
+    return {"meetings": meetings, "queue": queue_snapshot}
+
+
 @app.get("/api/councillors")
 def get_councillors():
     conn = get_db()
     data = list_councillors(conn)
     conn.close()
     return {"councillors": data}
+
+
+@app.get("/api/taxonomy")
+def get_taxonomy():
+    conn = get_db()
+    data = list_taxonomy(conn)
+    conn.close()
+    return {"taxonomy": data}
+
+
+@app.post("/api/taxonomy", status_code=201)
+def create_taxonomy_node(payload: TaxonomyCreate):
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO topics_taxonomy (label, parent_id, priority, synonyms_json, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                payload.label.strip(),
+                payload.parent_id,
+                payload.priority,
+                _serialize_synonyms(payload.synonyms),
+                _now_iso(),
+            ),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        conn.close()
+        return JSONResponse({"error": "Label bestaat al."}, status_code=400)
+    cur.execute("SELECT * FROM topics_taxonomy WHERE id = ?", (cur.lastrowid,))
+    row = cur.fetchone()
+    conn.close()
+    return {
+        "status": "created",
+        "node": {
+            "id": row["id"],
+            "label": row["label"],
+            "parent_id": row["parent_id"],
+            "priority": row["priority"],
+            "synonyms": json.loads(row["synonyms_json"] or "[]"),
+        },
+    }
+
+
+@app.patch("/api/taxonomy/{node_id}")
+def update_taxonomy_node(node_id: int, payload: TaxonomyUpdate):
+    data = payload.model_dump(exclude_unset=True)
+    if not data:
+        return {"status": "no changes"}
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM topics_taxonomy WHERE id = ?", (node_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return JSONResponse({"error": "Taxonomienode niet gevonden"}, status_code=404)
+    fields = []
+    values = []
+    if "label" in data and data["label"] is not None:
+        fields.append("label = ?")
+        values.append(data["label"].strip())
+    if "parent_id" in data:
+        fields.append("parent_id = ?")
+        values.append(data["parent_id"])
+    if "priority" in data and data["priority"] is not None:
+        fields.append("priority = ?")
+        values.append(int(data["priority"]))
+    if "synonyms" in data:
+        fields.append("synonyms_json = ?")
+        values.append(_serialize_synonyms(data["synonyms"]))
+    if not fields:
+        conn.close()
+        return {"status": "no changes"}
+    fields.append("updated_at = ?")
+    values.append(_now_iso())
+    values.append(node_id)
+    try:
+        cur.execute(
+            f"UPDATE topics_taxonomy SET {', '.join(fields)} WHERE id = ?",
+            values,
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        conn.close()
+        return JSONResponse({"error": "Label bestaat al."}, status_code=400)
+    cur.execute("SELECT * FROM topics_taxonomy WHERE id = ?", (node_id,))
+    node = cur.fetchone()
+    conn.close()
+    return {
+        "status": "ok",
+        "node": {
+            "id": node["id"],
+            "label": node["label"],
+            "parent_id": node["parent_id"],
+            "priority": node["priority"],
+            "synonyms": json.loads(node["synonyms_json"] or "[]"),
+        },
+    }
+
+
+@app.delete("/api/taxonomy/{node_id}")
+def delete_taxonomy_node(node_id: int):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM topics_taxonomy WHERE id = ?", (node_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return JSONResponse({"error": "Taxonomienode niet gevonden"}, status_code=404)
+    cur.execute("UPDATE topics_taxonomy SET parent_id = NULL WHERE parent_id = ?", (node_id,))
+    cur.execute("DELETE FROM topics_taxonomy WHERE id = ?", (node_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "deleted", "node_id": node_id}
 
 
 @app.get("/api/question-people")

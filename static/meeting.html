@@ -199,6 +199,107 @@
       letter-spacing: 0.05em;
     }
 
+    .meeting-status-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+
+    .processing-note {
+      margin: 0.5rem 0;
+      font-size: 0.85rem;
+    }
+
+    .group-badge {
+      display: inline-block;
+      background: #fef3c7;
+      color: #92400e;
+      padding: 0 0.45rem;
+      font-size: 0.75rem;
+      border-radius: 999px;
+      margin-left: 0.35rem;
+    }
+
+    .grouping-panel {
+      margin-top: 1rem;
+      padding: 0.75rem;
+      border: 1px dashed #cbd5f5;
+      border-radius: 0.5rem;
+      background: #f8fafc;
+    }
+
+    .grouping-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      align-items: center;
+      margin-top: 0.35rem;
+    }
+
+    .grouping-row select {
+      min-width: 180px;
+    }
+
+    .grouping-row input {
+      flex: 1;
+      min-width: 200px;
+    }
+
+    .group-note {
+      font-style: italic;
+      color: #475569;
+      margin: 0.5rem 0;
+    }
+
+    .followups {
+      margin-top: 1rem;
+    }
+
+    .followup-list {
+      list-style: none;
+      padding: 0;
+      margin: 0.5rem 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .followup-item {
+      border: 1px solid #e2e8f0;
+      border-radius: 0.5rem;
+      padding: 0.5rem 0.75rem;
+    }
+
+    .followup-meta {
+      font-size: 0.85rem;
+      color: #475569;
+      margin-bottom: 0.35rem;
+    }
+
+    .followup-actions {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    .followup-form {
+      margin-top: 0.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+    }
+
+    .followup-form .form-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+
+    .followup-form textarea {
+      min-height: 80px;
+    }
+
     .time-cell {
       font-variant-numeric: tabular-nums;
       color: #475569;
@@ -240,6 +341,10 @@
           <p class="eyebrow" id="meeting-date"></p>
           <h1 class="page-title" id="meeting-title">Vergadering</h1>
           <p class="muted" id="meeting-meta"></p>
+          <div class="meeting-status-row">
+            <span class="status-pill" id="meetingStatusPill" data-state="pending">Onbekend</span>
+            <span class="muted" id="meeting-progress"></span>
+          </div>
         </div>
         <div class="card-actions">
           <a id="export-link" class="ghost-btn" href="#">Download Word</a>
@@ -271,6 +376,7 @@
               <th>Schepen</th>
               <th>Vraag</th>
               <th>Antwoord</th>
+              <th>Status</th>
               <th>Acties</th>
             </tr>
           </thead>
@@ -360,6 +466,8 @@
   <script>
     const pathParts = window.location.pathname.split('/');
     const meetingId = pathParts[pathParts.length - 1];
+    const meetingStatusPill = document.getElementById('meetingStatusPill');
+    const meetingProgress = document.getElementById('meeting-progress');
 
     const deleteMeetingBtn = document.getElementById('deleteMeetingBtn');
     const restoreBtn = document.getElementById('restoreMissingBtn');
@@ -398,6 +506,7 @@
     });
 
     let currentQuestions = [];
+    let followupCache = {};
 
     const addQuestionBtn = document.getElementById('addQuestionBtn');
     const questionModal = document.getElementById('questionModal');
@@ -408,6 +517,7 @@
 
     let modalMode = 'create';
     let activeQuestionId = null;
+    let refreshTimer = null;
 
     const htmlEscape = (value) => {
       if (value === null || value === undefined) return '';
@@ -434,7 +544,40 @@
         }
       };
 
+    function scheduleMeetingRefresh(shouldRefresh) {
+      if (refreshTimer) {
+        clearTimeout(refreshTimer);
+        refreshTimer = null;
+      }
+      if (shouldRefresh) {
+        refreshTimer = setTimeout(() => loadMeeting({ silent: true }), 10000);
+      }
+    }
+
     const DASH = '\u2013';
+    const PROCESS_STATE_LABELS = {
+      completed: 'Klaar',
+      processing: 'Bezig',
+      pending: 'Wacht',
+      queued: 'Wacht',
+      error: 'Fout'
+    };
+
+    function formatMeetingProcessing(meeting) {
+      const state = (meeting.processing_state || '').toLowerCase() || 'pending';
+      const totalQuestions = Number(meeting.total_questions ?? 0) || 0;
+      const processed = Number(meeting.processed_questions ?? 0) || 0;
+      const label = PROCESS_STATE_LABELS[state] || 'Onbekend';
+      const progress = totalQuestions ? `${Math.min(processed, totalQuestions)}/${totalQuestions}` : `${processed}`;
+      return { state, label, progress };
+    }
+
+    function formatQuestionProcessing(question) {
+      const state = (question.processing_state || '').toLowerCase() || 'pending';
+      const label = PROCESS_STATE_LABELS[state] || 'Onbekend';
+      const error = question.processing_error || '';
+      return { state, label, error };
+    }
 
     const formatTimecode = (value) => {
       if (value === undefined || value === null || value === '') return DASH;
@@ -466,6 +609,35 @@
       }
       return `${from} ${DASH} ${to}`;
     };
+
+    function formatGroupTargetLabel(question) {
+      if (!question) return '';
+      const seq = question.sequence_nr || question.id;
+      const subject = question.subject || question.title || '';
+      const base = `vraag ${seq}`;
+      return subject ? `${base} – ${subject}` : base;
+    }
+
+    function renderFollowupItem(item) {
+      const speaker = formatName(item.speaker_given_name, item.speaker_family_name) || 'Onbekend';
+      const faction = item.speaker_faction ? ` (${item.speaker_faction})` : '';
+      const type = item.type || 'followup';
+      const status = (item.status || 'proposed').toUpperCase();
+      const timeDisplay = formatTimeRange(item.start_time, item.end_time);
+      const textHtml = (item.text || '').replace(/\n/g, '<br>');
+      return `
+        <li class="followup-item" data-followup-id="${item.id}">
+          <div class="followup-meta">
+            <strong>${htmlEscape(speaker)}</strong>${htmlEscape(faction)} – ${htmlEscape(type)} – ${timeDisplay} – <span class="status-pill" data-state="${item.status || 'proposed'}">${htmlEscape(status)}</span>
+          </div>
+          <p>${textHtml || '<span class="muted">Geen tekst</span>'}</p>
+          <div class="followup-actions">
+            <button type="button" class="ghost-btn followup-edit" data-id="${item.id}" data-question="${item.question_id}">Bewerk</button>
+            <button type="button" class="danger-btn followup-delete" data-id="${item.id}">Verwijder</button>
+          </div>
+        </li>
+      `;
+    }
 
     const formatName = (given, family) => {
       const name = [given, family].map(part => (part || '').trim()).filter(Boolean).join(' ');
@@ -576,21 +748,41 @@
 
     addQuestionBtn?.addEventListener('click', () => openQuestionModal('create'));
 
-    async function loadMeeting() {
+    async function loadMeeting(options = {}) {
+      const { silent = false } = options;
       const res = await fetch(`/api/meetings/${meetingId}`);
       if (!res.ok) {
         document.getElementById('meetingIntro').innerHTML = '<p class="muted">Vergadering niet gevonden.</p>';
         return;
       }
 
-        const data = await res.json();
-        currentQuestions = data.questions || [];
-        const m = data.meeting;
+      const data = await res.json();
+      currentQuestions = data.questions || [];
+      const questionLookup = {};
+      currentQuestions.forEach(item => {
+        questionLookup[item.id] = item;
+      });
+      followupCache = {};
+      const m = data.meeting;
       document.getElementById('meeting-date').textContent = m.meeting_date || '';
       document.getElementById('meeting-title').textContent =
         `${m.commission_name || 'Vergadering'} - ${m.meeting_date || ''}`;
       document.getElementById('meeting-meta').textContent =
         m.webcast_id ? `Webcast ID: ${m.webcast_id}` : 'Geen webcast-id ingesteld.';
+      const meetingStatus = formatMeetingProcessing(m);
+      if (meetingStatusPill) {
+        meetingStatusPill.dataset.state = meetingStatus.state;
+        meetingStatusPill.textContent = meetingStatus.label;
+      }
+      if (meetingProgress) {
+        if (meetingStatus.state === 'error' && m.processing_error) {
+          meetingProgress.textContent = m.processing_error;
+        } else if ((Number(m.total_questions ?? 0) || 0) > 0) {
+          meetingProgress.textContent = `${meetingStatus.progress} vragen`;
+        } else {
+          meetingProgress.textContent = '';
+        }
+      }
 
       if (m.webcast_id) {
         document.getElementById('webcast-container').innerHTML = `
@@ -619,7 +811,7 @@
           q.submitter_family_name,
           q.submitter_faction
         );
-          const assigneeInfo = buildPersonInfo(
+        const assigneeInfo = buildPersonInfo(
             q.assignee_given_name,
             q.assignee_family_name,
             q.assignee_label,
@@ -627,10 +819,13 @@
           );
           const questionRangeDisplay = formatTimeRange(q.question_start_time, q.question_end_time);
           const answerRangeDisplay = formatTimeRange(q.answer_start_time, q.answer_end_time);
+        const processingInfo = formatQuestionProcessing(q);
+        const groupTarget = q.group_root_question_id ? questionLookup[q.group_root_question_id] : null;
+        const groupBadge = groupTarget ? `<span class="group-badge">&rarr; ${htmlEscape(formatGroupTargetLabel(groupTarget))}</span>` : '';
 
           tr.innerHTML = `
           <td>${htmlEscape(q.sequence_nr || '')}</td>
-          <td>${htmlEscape(q.subject || '')}</td>
+          <td>${htmlEscape(q.subject || '')} ${groupBadge}</td>
           <td>
             <div class="person-cell">
               ${buildPersonLink(submitterInfo, 'submitter')}
@@ -643,6 +838,11 @@
           </td>
             <td class="time-cell">${questionRangeDisplay}</td>
             <td class="time-cell">${answerRangeDisplay}</td>
+            <td>
+              <span class="status-pill" data-state="${processingInfo.state}">
+                ${processingInfo.label}
+              </span>
+            </td>
             <td class="table-actions">
               <button type="button" class="icon-btn" data-action="view" title="Bekijk vraag">
                 <i data-feather="eye" aria-hidden="true"></i>
@@ -699,6 +899,35 @@
         const questionRange = formatTimeRange(q.question_start_time, q.question_end_time);
         const answerRange = formatTimeRange(q.answer_start_time, q.answer_end_time);
         const chips = '';
+        const processingNote = processingInfo.error
+          ? `<p class="muted processing-note">Fout: ${htmlEscape(processingInfo.error)}</p>`
+          : '';
+        const followers = currentQuestions.filter(item => item.group_root_question_id === q.id);
+        const followups = Array.isArray(q.followups) ? q.followups : [];
+        followups.forEach(f => {
+          followupCache[f.id] = f;
+        });
+        const followupItems = followups.length
+          ? followups.map(renderFollowupItem).join('')
+          : '<li class="muted">Nog geen aansluitingen.</li>';
+        let groupNote = '';
+        if (groupTarget) {
+          const targetLabel = htmlEscape(formatGroupTargetLabel(groupTarget));
+          const labelText = q.group_label ? htmlEscape(q.group_label) : `Zie ${targetLabel}.`;
+          groupNote = `<p class="group-note">Verwijst naar ${targetLabel}. ${labelText}</p>`;
+        } else if (followers.length) {
+          const plural = followers.length > 1 ? 'en' : '';
+          groupNote = `<p class="group-note">Hoofdvraag voor ${followers.length} gekoppelde vraag${plural}.</p>`;
+        }
+        const groupLabelValue = htmlEscape(q.group_label || '');
+        const groupOptions = currentQuestions
+          .filter(item => item.id !== q.id)
+          .map(item => {
+            const selected = item.id === q.group_root_question_id ? 'selected' : '';
+            const label = htmlEscape(formatGroupTargetLabel(item) || `vraag ${item.id}`);
+            return `<option value="${item.id}" ${selected}>${label}</option>`;
+          })
+          .join('');
 
         const detail = document.createElement('article');
         detail.className = 'question-card';
@@ -722,8 +951,48 @@
             <div><span>Vraag</span>${questionRange}</div>
             <div><span>Antwoord</span>${answerRange}</div>
             <div><span>Status</span><span class="status-pill status-${answerStatus}">${answerStatusLabel}</span></div>
+            <div><span>Verwerking</span><span class="status-pill" data-state="${processingInfo.state}">${processingInfo.label}</span></div>
           </div>
           ${chips}
+          ${processingNote}
+          ${groupNote}
+          <div class="grouping-panel">
+            <label>Vraaggroep</label>
+            <div class="grouping-row" data-question="${q.id}">
+              <select class="group-select" data-id="${q.id}">
+                <option value="">Zelfstandig antwoord</option>
+                ${groupOptions || '<option value="" disabled>Geen andere vragen beschikbaar</option>'}
+              </select>
+              <input type="text" class="group-label-input" data-id="${q.id}" placeholder="vb. Zie antwoord bij vraag 12" value="${groupLabelValue}">
+              <button type="button" class="ghost-btn group-save" data-id="${q.id}">Bewaar</button>
+            </div>
+          </div>
+          <div class="followups" data-question="${q.id}">
+            <h4>Aansluitingen & extra vragen</h4>
+            <ul class="followup-list">${followupItems}</ul>
+            <form class="followup-form" data-question="${q.id}">
+              <input type="hidden" name="followup_id">
+              <div class="form-row">
+                <input type="text" name="speaker_given_name" placeholder="Voornaam">
+                <input type="text" name="speaker_family_name" placeholder="Achternaam">
+                <input type="text" name="speaker_faction" placeholder="Fractie">
+              </div>
+              <div class="form-row">
+                <input type="text" name="start_time" placeholder="Starttijd">
+                <input type="text" name="end_time" placeholder="Eindtijd">
+                <select name="type">
+                  <option value="followup">Aansluiting</option>
+                  <option value="question">Extra vraag</option>
+                  <option value="remark">Opmerking</option>
+                </select>
+              </div>
+              <textarea name="text" placeholder="Samenvatting van de interventie"></textarea>
+              <div class="form-row">
+                <button type="submit" class="primary-btn">Toevoegen</button>
+                <button type="button" class="ghost-btn followup-reset" data-question="${q.id}">Reset</button>
+              </div>
+            </form>
+          </div>
           <h4>Vraag</h4>
           <p>${questionText || '<span class="muted">' + DASH + '</span>'}</p>
           <h4>Antwoord (quasi letterlijke versie)</h4>
@@ -825,7 +1094,7 @@
           });
         }
       });
-      if (location.hash) {
+      if (location.hash && !silent) {
         const target = document.querySelector(location.hash);
         if (target) {
           target.scrollIntoView({
@@ -836,6 +1105,10 @@
       if (window.feather && typeof window.feather.replace === 'function') {
         window.feather.replace();
       }
+      const questionStates = currentQuestions.map(q => (q.processing_state || '').toLowerCase());
+      const hasPendingQuestions = questionStates.some(state => state !== 'completed');
+      const needsRefresh = hasPendingQuestions || (meetingStatus.state !== 'completed');
+      scheduleMeetingRefresh(needsRefresh);
     }
 
     loadMeeting();
@@ -854,6 +1127,40 @@
         if (question) {
           openQuestionModal('edit', question);
         }
+      }
+    });
+
+    document.addEventListener('click', async (e) => {
+      const btn = e.target.closest('.group-save');
+      if (!btn) return;
+      const row = btn.closest('.grouping-row');
+      if (!row) return;
+      const selectEl = row.querySelector('.group-select');
+      const labelEl = row.querySelector('.group-label-input');
+      const questionId = Number(btn.dataset.id);
+      const payload = {
+        group_root_question_id: selectEl?.value ? Number(selectEl.value) : null,
+        group_label: labelEl?.value?.trim() || ''
+      };
+      btn.disabled = true;
+      const originalText = btn.textContent;
+      btn.textContent = 'Opslaan...';
+      try {
+        const res = await fetch(`/api/questions/${questionId}/group`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'Opslaan mislukt.');
+        }
+        await loadMeeting();
+      } catch (err) {
+        alert(err.message || 'Opslaan mislukt.');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
       }
     });
 
@@ -919,6 +1226,106 @@
         questionModalSubmit.disabled = false;
         questionModalSubmit.textContent = modalMode === 'create' ? submitLabelCreate : submitLabelEdit;
       }
+    });
+
+    document.addEventListener('submit', async (event) => {
+      const form = event.target.closest('.followup-form');
+      if (!form) return;
+      event.preventDefault();
+      const questionId = Number(form.dataset.question);
+      const formData = new FormData(form);
+      const followupId = formData.get('followup_id');
+      const payload = {};
+      formData.forEach((value, key) => {
+        if (key === 'followup_id') return;
+        payload[key] = value.trim();
+      });
+      const submitBtn = form.querySelector('button[type="submit"]');
+      const originalText = submitBtn?.textContent;
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = followupId ? 'Opslaan...' : 'Toevoegen...';
+      }
+      try {
+        const url = followupId
+          ? `/api/followups/${followupId}`
+          : `/api/questions/${questionId}/followups`;
+        const method = followupId ? 'PATCH' : 'POST';
+        const res = await fetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'Opslaan mislukt.');
+        }
+        form.reset();
+        const hidden = form.querySelector('input[name="followup_id"]');
+        if (hidden) hidden.value = '';
+        await loadMeeting();
+      } catch (err) {
+        alert(err.message || 'Opslaan mislukt.');
+      } finally {
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.textContent = originalText;
+        }
+      }
+    });
+
+    document.addEventListener('click', async (event) => {
+      const btn = event.target.closest('.followup-delete');
+      if (!btn) return;
+      const followupId = btn.dataset.id;
+      if (!followupId) return;
+      if (!confirm('Deze aansluiting verwijderen?')) return;
+      btn.disabled = true;
+      const originalText = btn.textContent;
+      btn.textContent = 'Verwijderen...';
+      try {
+        const res = await fetch(`/api/followups/${followupId}`, { method: 'DELETE' });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'Verwijderen mislukt.');
+        }
+        await loadMeeting();
+      } catch (err) {
+        alert(err.message || 'Verwijderen mislukt.');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
+    });
+
+    document.addEventListener('click', (event) => {
+      const btn = event.target.closest('.followup-edit');
+      if (!btn) return;
+      const followupId = Number(btn.dataset.id);
+      const questionId = btn.dataset.question;
+      const followup = followupCache[followupId];
+      if (!followup) return;
+      const form = document.querySelector(`.followup-form[data-question="${questionId}"]`);
+      if (!form) return;
+      form.querySelector('input[name="followup_id"]').value = followupId;
+      form.querySelector('input[name="speaker_given_name"]').value = followup.speaker_given_name || '';
+      form.querySelector('input[name="speaker_family_name"]').value = followup.speaker_family_name || '';
+      form.querySelector('input[name="speaker_faction"]').value = followup.speaker_faction || '';
+      form.querySelector('input[name="start_time"]').value = followup.start_time || '';
+      form.querySelector('input[name="end_time"]').value = followup.end_time || '';
+      form.querySelector('select[name="type"]').value = followup.type || 'followup';
+      form.querySelector('textarea[name="text"]').value = followup.text || '';
+      form.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+
+    document.addEventListener('click', (event) => {
+      const btn = event.target.closest('.followup-reset');
+      if (!btn) return;
+      const form = btn.closest('.followup-form');
+      if (!form) return;
+      form.reset();
+      const hidden = form.querySelector('input[name="followup_id"]');
+      if (hidden) hidden.value = '';
     });
   </script>
 </body>

@@ -21,3 +21,6 @@ Thumbs.db
 
 # Node/Frontend caches (just in case)
 node_modules/
+
+#uploads
+data/uploads/
