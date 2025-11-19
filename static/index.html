@@ -11,7 +11,8 @@
     <nav class="nav-links">
       <a href="/" class="active">Uploaden</a>
       <a href="#meetings">Vergaderingen</a>
-      <a href="#councillors">Raadsleden</a>
+      <a href="/councillors">Raadsleden</a>
+      <a href="/taxonomy">Taxonomie</a>
       <button type="button" class="nav-btn" id="openMeetingBtn">Open vergadering…</button>
     </nav>
   </header>
@@ -135,30 +136,6 @@
       <p class="meeting-empty" id="councillors-empty" hidden>Geen raadsleden beschikbaar.</p>
     </section>
 
-    <section class="card" id="taxonomy">
-      <div class="card-header">
-        <div>
-          <p class="eyebrow">Topics</p>
-          <h2>Taxonomiebeheer</h2>
-        </div>
-        <p class="muted">Definieer labels en synoniemen die de AI moet gebruiken.</p>
-      </div>
-      <div class="table-wrapper">
-        <table id="taxonomy-table">
-          <thead>
-            <tr>
-              <th>Label</th>
-              <th>Parent</th>
-              <th>Prioriteit</th>
-              <th>Synoniemen</th>
-              <th>Acties</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-      <p class="meeting-empty" id="taxonomy-empty" hidden>Geen labels geconfigureerd.</p>
-    </section>
   </main>
 
   <script>
@@ -195,18 +172,6 @@
       const label = labels[state] || 'Onbekend';
       const progress = totalQuestions ? `${Math.min(processed, totalQuestions)}/${totalQuestions}` : `${processed}`;
       return { state, label, progress };
-    }
-
-    function buildParentOptions(nodes, excludeId = null, selectedId = null) {
-      const options = ['<option value="">Geen</option>'];
-      nodes.forEach(node => {
-        if (excludeId && Number(node.id) === Number(excludeId)) {
-          return;
-        }
-        const selected = Number(node.id) === Number(selectedId) ? 'selected' : '';
-        options.push(`<option value="${node.id}" ${selected}>${htmlEscape(node.label)}</option>`);
-      });
-      return options.join('');
     }
 
     form.addEventListener('submit', async (e) => {
@@ -413,7 +378,6 @@
     }
 
     loadCouncillors();
-    loadTaxonomy();
 
     document.getElementById('councillors-table').addEventListener('click', async (e) => {
       const btn = e.target.closest('button');
@@ -463,115 +427,7 @@
         btn.textContent = originalText;
       }
     });
+
   </script>
 </body>
 </html>
-    async function loadTaxonomy() {
-      const tbody = document.querySelector('#taxonomy-table tbody');
-      const empty = document.getElementById('taxonomy-empty');
-      try {
-        const res = await fetch('/api/taxonomy');
-        if (!res.ok) throw new Error('Kon taxonomie niet laden.');
-        const data = await res.json();
-        const list = data.taxonomy || [];
-        tbody.innerHTML = '';
-        const createRow = document.createElement('tr');
-        createRow.dataset.id = 'new';
-        createRow.innerHTML = `
-          <td><input name="label" placeholder="Label"></td>
-          <td>
-            <select name="parent_id">
-              ${buildParentOptions(list)}
-            </select>
-          </td>
-          <td><input name="priority" type="number" value="0"></td>
-          <td><input name="synonyms" placeholder="synoniem1, synoniem2"></td>
-          <td><button class="save-btn" data-action="create">Toevoegen</button></td>
-        `;
-        tbody.appendChild(createRow);
-        list.forEach(node => {
-          const tr = document.createElement('tr');
-          tr.dataset.id = node.id;
-          const synonymValue = (node.synonyms || []).join(', ');
-          tr.innerHTML = `
-            <td><input name="label" value="${htmlEscape(node.label)}"></td>
-            <td>
-              <select name="parent_id">
-                ${buildParentOptions(list, node.id, node.parent_id)}
-              </select>
-            </td>
-            <td><input name="priority" type="number" value="${node.priority || 0}"></td>
-            <td><input name="synonyms" value="${htmlEscape(synonymValue)}"></td>
-            <td class="table-actions">
-              <button class="save-btn" data-action="save">Opslaan</button>
-              <button class="danger-btn" data-action="delete">Verwijder</button>
-            </td>
-          `;
-          tbody.appendChild(tr);
-        });
-        empty.hidden = list.length > 0;
-      } catch (err) {
-        empty.hidden = false;
-        empty.textContent = err.message || 'Kon taxonomie niet laden.';
-      }
-    }
-    document.getElementById('taxonomy-table').addEventListener('click', async (e) => {
-      const btn = e.target.closest('button');
-      if (!btn) return;
-      const action = btn.dataset.action;
-      const row = btn.closest('tr');
-      if (!action || !row) return;
-      const formData = {};
-      row.querySelectorAll('input, select').forEach(inp => {
-        formData[inp.name] = inp.value;
-      });
-      const payload = {
-        label: formData.label?.trim(),
-        parent_id: formData.parent_id ? Number(formData.parent_id) : null,
-        priority: formData.priority ? Number(formData.priority) : 0,
-        synonyms: (formData.synonyms || '')
-          .split(',')
-          .map(val => val.trim())
-          .filter(Boolean)
-      };
-      btn.disabled = true;
-      const originalText = btn.textContent;
-      try {
-        if (action === 'create') {
-          const res = await fetch('/api/taxonomy', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-          });
-          if (!res.ok) {
-            const data = await res.json().catch(() => ({}));
-            throw new Error(data.error || 'Toevoegen mislukt.');
-          }
-        } else if (action === 'save') {
-          const id = row.dataset.id;
-          const res = await fetch(`/api/taxonomy/${id}`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-          });
-          if (!res.ok) {
-            const data = await res.json().catch(() => ({}));
-            throw new Error(data.error || 'Opslaan mislukt.');
-          }
-        } else if (action === 'delete') {
-          const id = row.dataset.id;
-          if (!confirm('Dit label verwijderen?')) return;
-          const res = await fetch(`/api/taxonomy/${id}`, { method: 'DELETE' });
-          if (!res.ok) {
-            const data = await res.json().catch(() => ({}));
-            throw new Error(data.error || 'Verwijderen mislukt.');
-          }
-        }
-        await loadTaxonomy();
-      } catch (err) {
-        alert(err.message || 'Bewerking mislukt.');
-      } finally {
-        btn.disabled = false;
-        btn.textContent = originalText;
-      }
-    });
