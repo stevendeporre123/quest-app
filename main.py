@@ -749,6 +749,12 @@ def councillors_page():
     return html
 
 
+@app.get("/taxonomy", response_class=HTMLResponse)
+def taxonomy_page():
+    html = (static_dir / "taxonomy.html").read_text(encoding="utf-8")
+    return html
+
+
 def _sanitize_filename(name: str, fallback: str) -> str:
     candidate = (name or fallback or "uploaded").strip().lower()
     allowed = [c if c.isalnum() else "-" for c in candidate]
